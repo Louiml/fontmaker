@@ -11,12 +11,8 @@ description = "FontMaker: a pure-Rust typeface editor with an Illustrator-style 
 fontmaker-core.workspace = true
 fontmaker-script.workspace = true
 fontmaker-export.workspace = true
-fontmaker-shaping.workspace = true
 kurbo.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-lyon.workspace = true
 
 [dependencies.iced]
 version = "0.14"
-features = ["tiny-skia", "advanced"]
+features = ["tiny-skia", "canvas", "advanced"]

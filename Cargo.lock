@@ -997,12 +997,8 @@ dependencies = [
  "fontmaker-core",
  "fontmaker-export",
  "fontmaker-script",
- "fontmaker-shaping",
  "iced",
  "kurbo 0.13.1",
- "lyon",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -1461,6 +1457,7 @@ dependencies = [
  "iced_core",
  "iced_futures",
  "log",
+ "lyon_path",
  "raw-window-handle",
  "rustc-hash 2.1.3",
  "thiserror 2.0.21",
@@ -1535,6 +1532,7 @@ dependencies = [
  "iced_debug",
  "iced_graphics",
  "log",
+ "lyon",
  "rustc-hash 2.1.3",
  "thiserror 2.0.21",
  "wgpu",

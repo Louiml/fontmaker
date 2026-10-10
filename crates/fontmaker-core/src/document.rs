@@ -44,7 +44,7 @@ impl Script {
 
     /// Whether this script needs positional forms and joining behaviour.
     pub fn uses_forms(self) -> bool {
-        matches!(self, Script::Arabic | Script::Hebrew)
+        matches!(self, Script::Arabic)
     }
 
     /// Whether the script is written right-to-left.
@@ -52,13 +52,21 @@ impl Script {
         matches!(self, Script::Arabic | Script::Hebrew)
     }
 
-    /// Four forms are drawn for Arabic; Hebrew omits the initial form.
+    /// Which positional forms are drawn.
+    ///
+    /// Arabic needs all four. Hebrew does not: its final forms (ך ם ן ף ץ) are
+    /// separate codepoints, so one glyph per codepoint is enough.
     pub fn forms(self) -> &'static [Form] {
         match self {
             Script::Arabic => &Form::ALL,
-            Script::Hebrew => &[Form::Isol, Form::Medi, Form::Fina],
             _ => &[Form::Isol],
         }
+    }
+}
+
+impl std::fmt::Display for Script {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.display_name())
     }
 }
 
@@ -394,7 +402,9 @@ mod tests {
         assert_eq!(names[3].1, "uni0627.fina");
 
         doc.script = Script::Hebrew;
-        assert_eq!(doc.form_names("uni05D0").len(), 3);
+        // Hebrew final forms are separate codepoints, not OpenType forms.
+        assert_eq!(doc.form_names("uni05D0").len(), 1);
+        assert!(!Script::Hebrew.uses_forms());
     }
 
     #[test]
