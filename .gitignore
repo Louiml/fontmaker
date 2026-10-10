@@ -1,0 +1,22 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# editors / IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# build artifacts and user projects
+/out
+/dist
+/artifacts
+/examples-out
+*.ttf
+!crates/fontmaker-export/tests/fixtures/**/*.ttf
+*.otf
+*.woff
+*.woff2
+*.designspace
+*.ufo/

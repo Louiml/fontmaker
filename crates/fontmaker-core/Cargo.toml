@@ -1,0 +1,13 @@
+[package]
+name = "fontmaker-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core document, glyph and geometry model for FontMaker"
+
+[dependencies]
+kurbo = { workspace = true, features = ["serde"] }
+serde.workspace = true
+serde_json.workspace = true

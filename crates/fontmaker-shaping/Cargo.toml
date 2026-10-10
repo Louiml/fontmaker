@@ -1,0 +1,15 @@
+[package]
+name = "fontmaker-shaping"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shaping bridge for FontMaker preview: build in memory, shape, return outlines"
+
+[dependencies]
+fontmaker-core.workspace = true
+fontmaker-export.workspace = true
+allsorts.workspace = true
+skrifa.workspace = true
+kurbo.workspace = true

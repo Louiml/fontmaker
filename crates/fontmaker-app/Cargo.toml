@@ -1,0 +1,22 @@
+[package]
+name = "fontmaker-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "FontMaker: a pure-Rust typeface editor with an Illustrator-style interface"
+
+[dependencies]
+fontmaker-core.workspace = true
+fontmaker-script.workspace = true
+fontmaker-export.workspace = true
+fontmaker-shaping.workspace = true
+kurbo.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+lyon.workspace = true
+
+[dependencies.iced]
+version = "0.14"
+features = ["tiny-skia", "advanced"]

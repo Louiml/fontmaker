@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/fontmaker-core",
+    "crates/fontmaker-script",
+    "crates/fontmaker-export",
+    "crates/fontmaker-shaping",
+    "crates/fontmaker-app",
+    "crates/xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/Louiml/fontmaker"
+homepage = "https://github.com/Louiml/fontmaker"
+description = "FontMaker - a pure-Rust typeface editor with an Illustrator-style interface"
+authors = ["FontMaker contributors"]
+keywords = ["font", "typeface", "editor", "opentype", "truetype"]
+categories = ["graphics", "gui"]
+
+[workspace.dependencies]
+fontmaker-core = { path = "crates/fontmaker-core", version = "0.1.0" }
+fontmaker-script = { path = "crates/fontmaker-script", version = "0.1.0" }
+fontmaker-export = { path = "crates/fontmaker-export", version = "0.1.0" }
+fontmaker-shaping = { path = "crates/fontmaker-shaping", version = "0.1.0" }
+
+kurbo = "0.13"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+write-fonts = "0.54"
+read-fonts = "0.45"
+font-types = "0.12.6"
+skrifa = "0.48"
+allsorts = "0.17"
+tiny-skia = "0.12"
+lyon = "1.0"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
