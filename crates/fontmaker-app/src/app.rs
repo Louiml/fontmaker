@@ -165,6 +165,9 @@ pub enum CanvasMsg {
     Released,
     Moved { font: kurbo::Point },
     Scrolled { screen: Point, up: bool },
+    /// The canvas reported its size so the view can be fitted. Sent when the
+    /// size actually changes, including the first frame after startup.
+    Size { width: f32, height: f32 },
 }
 
 pub struct App {
@@ -345,6 +348,13 @@ impl App {
 
     fn canvas_message(&mut self, msg: CanvasMsg) -> Task<Message> {
         match msg {
+            CanvasMsg::Size { width, height } => {
+                self.last_size = (width, height);
+                if self.fit_pending {
+                    self.refit();
+                }
+                Task::none()
+            }
             CanvasMsg::Scrolled { screen, up } => {
                 let factor = if up { 1.15 } else { 1.0 / 1.15 };
                 self.camera.zoom_at(screen, factor);
@@ -433,7 +443,14 @@ impl App {
                 }
             }
             Tool::Pen => {
-                if let Some((c, n)) = self.hit_node(p) {
+                // Clicking the first node of the contour being drawn closes it;
+                // clicking any other node drags it; otherwise we add a point.
+                let open_first = self.open_trailing_contour().and_then(|(ci, _)| {
+                    self.hit_node(p).filter(|(c, n)| *c == ci && *n == 0)
+                });
+                if let Some((ci, _)) = open_first {
+                    self.close_contour(ci);
+                } else if let Some((c, n)) = self.hit_node(p) {
                     self.selection = vec![(c, n)];
                     self.drag = Some(DragKind::Node { contour: c, node: n });
                 } else {
@@ -447,35 +464,54 @@ impl App {
         }
     }
 
+    /// The trailing contour if it is open and non-empty, as `(index, node count)`.
+    fn open_trailing_contour(&self) -> Option<(usize, usize)> {
+        let glyph = self.doc.glyph(&self.current)?;
+        let ci = glyph.contours.len().checked_sub(1)?;
+        let contour = glyph.contours.get(ci)?;
+        (!contour.closed && !contour.nodes.is_empty()).then_some((ci, contour.nodes.len()))
+    }
+
+    fn close_contour(&mut self, ci: usize) {
+        self.history.touch(&self.doc, &self.current);
+        if let Some(contour) = self
+            .doc
+            .glyph_mut(&self.current)
+            .and_then(|g| g.contours.get_mut(ci))
+        {
+            contour.closed = true;
+        }
+        self.history.commit(&self.doc);
+        self.selection.clear();
+        self.status = "Contour closed.".to_string();
+    }
+
     /// Pen tool: append a point to the open contour, or start a new one.
+    ///
+    /// The new point becomes the drag target, so it follows the cursor for as
+    /// long as the button is held down and lands exactly where it was clicked
+    /// when it is not.
     fn pen_add_point(&mut self, p: kurbo::Point) {
-        let radius = self.hit_radius_font();
-        let Some(glyph) = self.doc.glyph_mut(&self.current) else { return };
-        let open = glyph
-            .contours
-            .last()
-            .map(|c| !c.closed && !c.is_empty())
-            .unwrap_or(false);
-        if open {
-            let contour = glyph.contours.last_mut().unwrap();
-            if (contour.nodes[0].pos - p).hypot() <= radius {
-                // Clicking the first node closes the contour.
-                contour.closed = true;
-                self.history.commit(&self.doc);
-                self.status = "Contour closed.".to_string();
-                return;
+        let target = {
+            let Some(glyph) = self.doc.glyph_mut(&self.current) else { return };
+            let open = glyph
+                .contours
+                .last()
+                .map(|c| !c.closed && !c.is_empty())
+                .unwrap_or(false);
+            if open {
+                glyph.contours.last_mut().unwrap().nodes.push(Node::corner(p));
+            } else {
+                glyph.contours.push(Contour::new(vec![Node::corner(p)], false));
+                self.status = "Drawing: click to add points, click the first point or press Escape to close.".to_string();
             }
-            contour.nodes.push(Node::corner(p));
             let ci = glyph.contours.len() - 1;
             let ni = glyph.contours[ci].nodes.len() - 1;
-            self.selection = vec![(ci, ni)];
-        } else {
-            glyph.contours.push(Contour::new(vec![Node::corner(p)], false));
-            let ci = glyph.contours.len() - 1;
-            self.selection = vec![(ci, 0)];
-            self.status = "Drawing: click to add points, click the first point or press Escape to close.".to_string();
-        }
+            (ci, ni)
+        };
         self.history.touch(&self.doc, &self.current);
+        self.selection = vec![target];
+        self.drag = Some(DragKind::Node { contour: target.0, node: target.1 });
     }
 
     fn drag_move(&mut self, font: kurbo::Point, screen: Point) {

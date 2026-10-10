@@ -32,10 +32,23 @@ pub struct GlyphCanvas<'a> {
     pub app: &'a App,
 }
 
-/// Transient canvas state: whether a button is currently held down.
+/// Transient canvas state: whether a button is currently held down, and the
+/// last size we reported so resize messages are only sent on actual changes.
 #[derive(Default)]
 pub struct CanvasState {
     pressed: bool,
+    reported_size: Option<(f32, f32)>,
+}
+
+/// The cursor position in *canvas-local* coordinates.
+///
+/// The runtime hands us window-space positions; the canvas draws in a frame
+/// translated by `bounds.x/y`, so without this subtraction every point lands
+/// offset by the toolbar and the glyph grid.
+fn local_cursor(cursor: iced::mouse::Cursor, bounds: Rectangle) -> Option<Point> {
+    cursor
+        .position()
+        .map(|p| Point::new(p.x - bounds.x, p.y - bounds.y))
 }
 
 impl Program<Message, Theme, iced::Renderer> for GlyphCanvas<'_> {
@@ -45,59 +58,74 @@ impl Program<Message, Theme, iced::Renderer> for GlyphCanvas<'_> {
         &self,
         state: &mut Self::State,
         event: &canvas::Event,
-        _bounds: Rectangle,
+        bounds: Rectangle,
         cursor: iced::mouse::Cursor,
     ) -> Option<Action<Message>> {
-        match event {
-            canvas::Event::Mouse(mouse_event) => match mouse_event {
-                iced::mouse::Event::ButtonPressed(button) => {
-                    let pos = cursor.position()?;
-                    state.pressed = true;
-                    let right = matches!(
-                        button,
-                        iced::mouse::Button::Right | iced::mouse::Button::Middle
-                    );
-                    Some(Action::publish(Message::Canvas(CanvasMsg::Pressed {
-                        font: self.app.camera.to_font(pos),
+        // Report the canvas size when it changes so the app can fit the view.
+        // Redraws happen every frame, making this a cheap place to check.
+        if let canvas::Event::Window(iced::window::Event::RedrawRequested(_)) = event {
+            let size = (bounds.width, bounds.height);
+            if state.reported_size != Some(size) {
+                state.reported_size = Some(size);
+                return Some(Action::publish(Message::Canvas(CanvasMsg::Size {
+                    width: size.0,
+                    height: size.1,
+                })));
+            }
+            return None;
+        }
+
+        let canvas::Event::Mouse(mouse_event) = event else {
+            return None;
+        };
+
+        match mouse_event {
+            iced::mouse::Event::ButtonPressed(button) => {
+                let pos = local_cursor(cursor, bounds)?;
+                state.pressed = true;
+                let right = matches!(
+                    button,
+                    iced::mouse::Button::Right | iced::mouse::Button::Middle
+                );
+                Some(Action::publish(Message::Canvas(CanvasMsg::Pressed {
+                    font: self.app.camera.to_font(pos),
+                    screen: pos,
+                    right_click: right,
+                })))
+            }
+            iced::mouse::Event::ButtonReleased(_) => {
+                if state.pressed {
+                    state.pressed = false;
+                    Some(Action::publish(Message::Canvas(CanvasMsg::Released)))
+                } else {
+                    None
+                }
+            }
+            iced::mouse::Event::CursorMoved { .. } => {
+                let pos = local_cursor(cursor, bounds)?;
+                let font = self.app.camera.to_font(pos);
+                let msg = if state.pressed {
+                    Message::Canvas(CanvasMsg::Dragged { font, screen: pos })
+                } else {
+                    Message::Canvas(CanvasMsg::Moved { font })
+                };
+                Some(Action::publish(msg))
+            }
+            iced::mouse::Event::WheelScrolled { delta } => {
+                let pos = local_cursor(cursor, bounds)?;
+                let y = match delta {
+                    iced::mouse::ScrollDelta::Lines { y, .. } => *y,
+                    iced::mouse::ScrollDelta::Pixels { y, .. } => *y / 40.0,
+                };
+                if y == 0.0 {
+                    None
+                } else {
+                    Some(Action::publish(Message::Canvas(CanvasMsg::Scrolled {
                         screen: pos,
-                        right_click: right,
+                        up: y > 0.0,
                     })))
                 }
-                iced::mouse::Event::ButtonReleased(_) => {
-                    if state.pressed {
-                        state.pressed = false;
-                        Some(Action::publish(Message::Canvas(CanvasMsg::Released)))
-                    } else {
-                        None
-                    }
-                }
-                iced::mouse::Event::CursorMoved { .. } => {
-                    let pos = cursor.position()?;
-                    let font = self.app.camera.to_font(pos);
-                    let msg = if state.pressed {
-                        Message::Canvas(CanvasMsg::Dragged { font, screen: pos })
-                    } else {
-                        Message::Canvas(CanvasMsg::Moved { font })
-                    };
-                    Some(Action::publish(msg))
-                }
-                iced::mouse::Event::WheelScrolled { delta } => {
-                    let pos = cursor.position()?;
-                    let y = match delta {
-                        iced::mouse::ScrollDelta::Lines { y, .. } => *y,
-                        iced::mouse::ScrollDelta::Pixels { y, .. } => *y / 40.0,
-                    };
-                    if y == 0.0 {
-                        None
-                    } else {
-                        Some(Action::publish(Message::Canvas(CanvasMsg::Scrolled {
-                            screen: pos,
-                            up: y > 0.0,
-                        })))
-                    }
-                }
-                _ => None,
-            },
+            }
             _ => None,
         }
     }
