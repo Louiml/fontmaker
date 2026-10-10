@@ -162,7 +162,11 @@ pub fn flatten(path: &BezPath, tolerance: f64) -> Vec<Vec<Point>> {
             }
             PathEl::LineTo(p) => current.push(p),
             PathEl::QuadTo(c, p) => {
-                let curve = CubicBez::new(start, c, c, p);
+                // Degree-elevate the quad to its exact cubic equivalent.
+                // (Using (start, c, c, p) directly would be a different curve.)
+                let c1 = start + (c - start) * (2.0 / 3.0);
+                let c2 = p + (c - p) * (2.0 / 3.0);
+                let curve = CubicBez::new(start, c1, c2, p);
                 push_cubic(&mut current, &curve, tolerance);
             }
             PathEl::CurveTo(c1, c2, p) => {
@@ -297,10 +301,25 @@ pub fn mirror_x(nodes: &mut [Node], axis_x: f64) {
     }
 }
 
+/// Mirror points across the horizontal line `y = axis_y`.
+pub fn mirror_y(nodes: &mut [Node], axis_y: f64) {
+    for n in nodes.iter_mut() {
+        n.pos = Point::new(n.pos.x, 2.0 * axis_y - n.pos.y);
+        if let Some(h) = &mut n.in_handle {
+            *h = Point::new(h.x, 2.0 * axis_y - h.y);
+        }
+        if let Some(h) = &mut n.out_handle {
+            *h = Point::new(h.x, 2.0 * axis_y - h.y);
+        }
+    }
+}
+
 /// Round to the nearest 1/64 unit, which is the grid TrueType stores on.
 pub fn round_to_f26dot6(v: f64) -> i32 {
     (v * 64.0).round() as i32
 }
+
+
 
 #[cfg(test)]
 mod tests {
@@ -384,4 +403,25 @@ mod tests {
         assert!(near_curve_extrema(Point::new(50.0, 75.0), &seg, 1.0));
         assert!(!near_curve_extrema(Point::new(50.0, 5.0), &seg, 1.0));
     }
+
+    #[test]
+    fn mirror_y_flips_across_horizontal_axis() {
+        let mut nodes = vec![Node::smooth(
+            Point::new(0.0, 10.0),
+            Point::new(-10.0, 15.0),
+            Point::new(10.0, 5.0),
+        )];
+        mirror_y(&mut nodes, 20.0);
+        assert_eq!(nodes[0].pos, Point::new(0.0, 30.0));
+        assert_eq!(nodes[0].in_handle, Some(Point::new(-10.0, 25.0)));
+        assert_eq!(nodes[0].out_handle, Some(Point::new(10.0, 35.0)));
+    }
+
+
+
+
+
+
+
+
 }

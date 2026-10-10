@@ -1,19 +1,22 @@
-//! Side panels: toolbar, glyph grid, inspector, preview bar and status bar.
+//! Side panels: toolbar, glyph grid, inspector, font info, preview bar and
+//! status bar.
 
 use fontmaker_core::document::Script;
 use fontmaker_export::ExportFormat;
 
-use iced::widget::{button, column, container, pick_list, row, scrollable, slider, text, text_input};
+use iced::widget::{
+    button, column, container, pick_list, row, scrollable, slider, text, text_input,
+};
 use iced::{Element, Length, Padding};
 
-use crate::app::{App, Message, Tool};
+use crate::app::{App, Message, MetaField, RightTab, Tool};
 
 const PANEL_BG: iced::Color = iced::Color::from_rgb8(0x26, 0x26, 0x2c);
 
-fn panel<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+fn panel<'a>(content: impl Into<Element<'a, Message>>, height: Length) -> Element<'a, Message> {
     container(content)
         .width(Length::Shrink)
-        .height(Length::Fill)
+        .height(height)
         .padding(6)
         .style(|_| container::Style {
             background: Some(PANEL_BG.into()),
@@ -53,6 +56,9 @@ pub fn toolbar(app: &App) -> Element<'_, Message> {
         button(text("Save").size(13)).on_press(Message::SaveProject).padding(Padding::from(6)),
         button(text("Load").size(13)).on_press(Message::LoadProject).padding(Padding::from(6)),
         button(text("Fit").size(13)).on_press(Message::FitView).padding(Padding::from(6)),
+        button(text(if app.snap { "Snap: on" } else { "Snap: off" }).size(13))
+            .on_press(Message::ToggleSnap)
+            .padding(Padding::from(6)),
     ].spacing(2);
 
     let export = row![
@@ -60,7 +66,7 @@ pub fn toolbar(app: &App) -> Element<'_, Message> {
         button(text(".ttf").size(13)).on_press(Message::Export(ExportFormat::Ttf)).padding(Padding::from(6)),
         button(text(".woff").size(13)).on_press(Message::Export(ExportFormat::Woff)).padding(Padding::from(6)),
         button(text(".woff2").size(13)).on_press(Message::Export(ExportFormat::Woff2)).padding(Padding::from(6)),
-    ].spacing(2).push(text("").size(4));
+    ].spacing(2);
 
     row![
         text("FontMaker").size(16),
@@ -106,8 +112,8 @@ pub fn glyph_grid(app: &App) -> Element<'_, Message> {
             scrollable(rows).height(Length::Fill),
         ]
         .spacing(6)
-        .width(220)
-        .height(Length::Fill),
+        .width(220),
+        Length::Fill,
     )
 }
 
@@ -129,33 +135,67 @@ fn glyph_tile<'a>(app: &'a App, name: &str) -> Element<'a, Message> {
         _ => {
             let short: String = name.chars().take(8).collect();
             if name.chars().count() > 8 {
-                format!("{short}׳³ֲ³׳’ג‚¬ג„¢׳³ג€™׳’ג‚¬ֲײ²ֲ¬׳²ֲ²ײ²ֲ¦")
+                format!("{short}..")
             } else {
                 short
             }
         }
     };
 
-    let marker = if is_current { "׳³ֲ³׳’ג‚¬ג„¢׳³ג€™׳’ג€ֲ¬׳’ג‚¬ֲ׳²ֲ²ײ²ֲ¶" } else if drawn { "׳³ֲ³׳’ג‚¬ג„¢׳³ג€™׳’ג€ֲ¬׳’ג‚¬ֲ׳²ֲ²ײ²ֲ" } else { " " };
+    let marker = if is_current {
+        "selected"
+    } else if drawn {
+        "drawn"
+    } else {
+        ""
+    };
 
     button(
         column![
             text(label).size(15),
-            text(marker).size(10),
+            text(marker).size(9),
         ]
         .align_x(iced::alignment::Horizontal::Center)
         .spacing(1),
     )
     .on_press(Message::SelectGlyph(name.to_string()))
-    .width(40)
+    .width(42)
     .padding(Padding::from(3))
     .into()
 }
 
-/// Right-hand inspector: metrics for the current glyph plus glyph management.
+/// The right column: large preview on top, tab buttons, then the active panel.
+pub fn right_column(app: &App) -> Element<'_, Message> {
+    let tabs = row![
+        button(text("Glyph").size(13))
+            .on_press(Message::SelectTab(RightTab::Inspector))
+            .padding(Padding::from(5)),
+        button(text("Font info").size(13))
+            .on_press(Message::SelectTab(RightTab::Info))
+            .padding(Padding::from(5)),
+    ]
+    .spacing(4);
+
+    let content = match app.right_tab {
+        RightTab::Inspector => inspector(app),
+        RightTab::Info => font_info(app),
+    };
+
+    column![
+        crate::canvas_view::preview_canvas(app),
+        tabs,
+        content,
+    ]
+    .width(Length::Shrink)
+    .height(Length::Fill)
+    .spacing(4)
+    .into()
+}
+
+/// The glyph inspector: metrics, editing actions, glyph management.
 pub fn inspector(app: &App) -> Element<'_, Message> {
     let Some(glyph) = app.doc.glyph(&app.current) else {
-        return panel(text("No glyph selected.").size(13));
+        return panel(text("No glyph selected.").size(13), Length::Fill);
     };
 
     let char_info = glyph
@@ -166,10 +206,15 @@ pub fn inspector(app: &App) -> Element<'_, Message> {
 
     let status = if glyph.is_drawn() { "drawn" } else { "empty" };
 
+    // Sidebearings from the actual ink, not the stored lsb field.
+    let sidebearings = match glyph.bounds() {
+        Some(b) => format!("LSB {:.0}   RSB {:.0}", b.x0, glyph.advance - b.x1),
+        None => "LSB -   RSB -".to_string(),
+    };
+
     let advance_row = row![
         text("advance").size(13),
-        slider(0.0..=2000.0, glyph.advance, Message::SetAdvance)
-            .width(120),
+        slider(0.0..=2000.0, glyph.advance, Message::SetAdvance).width(110),
         text(format!("{:.0}", glyph.advance)).size(13),
     ]
     .spacing(6)
@@ -189,13 +234,32 @@ pub fn inspector(app: &App) -> Element<'_, Message> {
             .filter(|(f, _n)| *f != fontmaker_core::Form::Isol)
             .map(|(f, n)| {
                 let drawn = app.doc.glyph(n).map(|g| g.is_drawn()).unwrap_or(false);
-                format!("{}{}", f.feature_tag(), if drawn { " ׳³ֲ³׳’ג‚¬ג„¢׳²ֲ²ײ²ֲ׳³ג€™׳’ג€ֲ¬ײ²ֲ" } else { " ׳³ֲ³׳’ג‚¬ג„¢׳²ֲ²ײ²ֲ׳³ג€™׳’ג€ֲ¬׳’ג‚¬ֲ" })
+                format!("{}: {}", f.feature_tag(), if drawn { "drawn" } else { "todo" })
             })
             .collect();
-        text(format!("forms: {}", drawn_forms.join("  "))).size(13)
+        text(format!("forms: {}", drawn_forms.join(", "))).size(12)
     } else {
-        text(String::new()).size(13)
+        text(String::new()).size(12)
     };
+
+    let metric_buttons = row![
+        button(text("Auto advance").size(12))
+            .on_press(Message::AutoAdvance)
+            .padding(Padding::from(5)),
+        button(text("Duplicate").size(12))
+            .on_press(Message::DuplicateGlyph)
+            .padding(Padding::from(5)),
+    ]
+    .spacing(4);
+
+    let edit_buttons = row![
+        button(text("Corner/Smooth").size(12))
+            .on_press(Message::ConvertNodes)
+            .padding(Padding::from(5)),
+        button(text("Flip H").size(12)).on_press(Message::FlipH).padding(Padding::from(5)),
+        button(text("Flip V").size(12)).on_press(Message::FlipV).padding(Padding::from(5)),
+    ]
+    .spacing(4);
 
     panel(
         column![
@@ -203,17 +267,52 @@ pub fn inspector(app: &App) -> Element<'_, Message> {
             text(&glyph.name).size(16),
             text(char_info).size(13),
             text(status).size(13),
+            text(sidebearings).size(13),
             advance_row,
             contours,
             forms,
-            iced::widget::Space::new().height(Length::Fill),
-            button(text("Delete glyph").size(13))
+            metric_buttons,
+            edit_buttons,
+            button(text("Delete glyph").size(12))
                 .on_press(Message::DeleteGlyph)
-                .padding(Padding::from(6)),
+                .padding(Padding::from(5)),
         ]
         .spacing(6)
-        .width(200)
-        .height(Length::Fill),
+        .width(210),
+        Length::Fill,
+    )
+}
+
+/// The font metadata editor.
+pub fn font_info(app: &App) -> Element<'_, Message> {
+    let meta_input = |label: &'static str, value: &str, field: MetaField| {
+        text_input(label, value)
+            .on_input(move |s| Message::MetaChanged(field, s))
+            .size(13)
+            .width(190)
+    };
+
+    panel(
+        column![
+            text("Font Info").size(14),
+            text("family").size(11),
+            meta_input("Family name", &app.doc.meta.family_name, MetaField::Family),
+            text("style").size(11),
+            meta_input("Style name", &app.doc.meta.style_name, MetaField::Style),
+            text("designer").size(11),
+            meta_input("Designer", &app.doc.meta.designer, MetaField::Designer),
+            text("version").size(11),
+            meta_input("Version", &app.doc.meta.version, MetaField::Version),
+            text(format!(
+                "PostScript name:\n{}",
+                app.doc.meta.postscript_name()
+            ))
+            .size(12),
+            text("Used for exports and the project file name.").size(11),
+        ]
+        .spacing(4)
+        .width(210),
+        Length::Fill,
     )
 }
 

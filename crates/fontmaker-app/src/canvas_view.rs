@@ -16,6 +16,7 @@ use crate::app::{App, CanvasMsg, Message, Tool};
 
 /// Colors.
 const BACKGROUND: Color = Color::from_rgb8(0x1e, 0x1e, 0x22);
+const PREVIEW_BG: Color = Color::from_rgb8(0x17, 0x17, 0x1b);
 const BASELINE: Color = Color::from_rgb8(0x3d, 0x6a, 0x7a);
 const METRIC_LINE: Color = Color::from_rgb8(0x27, 0x3c, 0x46);
 const INK: Color = Color::from_rgb8(0xdd, 0xdd, 0xdd);
@@ -172,7 +173,7 @@ impl Program<Message, Theme, iced::Renderer> for GlyphCanvas<'_> {
 }
 
 /// Draw a contour into a canvas path, in screen coordinates.
-fn contour_path(cam: &crate::app::Camera, contour: &Contour) -> CanvasPath {
+pub(crate) fn contour_path(cam: &crate::app::Camera, contour: &Contour) -> CanvasPath {
     let mut builder = canvas::path::Builder::new();
     let Some(first) = contour.nodes.first() else {
         return builder.build();
@@ -204,7 +205,7 @@ fn contour_path(cam: &crate::app::Camera, contour: &Contour) -> CanvasPath {
     builder.build()
 }
 
-fn draw_guides(frame: &mut Frame, cam: &crate::app::Camera, advance: f64, doc: &fontmaker_core::Document) {
+pub(crate) fn draw_guides(frame: &mut Frame, cam: &crate::app::Camera, advance: f64, doc: &fontmaker_core::Document) {
     // Vertical metrics, spanning a little beyond the advance width.
     let x0 = cam.to_screen(kurbo::Point::new(-150.0, 0.0)).x;
     let x1 = cam.to_screen(kurbo::Point::new(advance + 150.0, 0.0)).x;
@@ -231,7 +232,7 @@ fn draw_guides(frame: &mut Frame, cam: &crate::app::Camera, advance: f64, doc: &
     }
 }
 
-fn draw_glyph(frame: &mut Frame, cam: &crate::app::Camera, glyph: &fontmaker_core::Glyph) {
+pub(crate) fn draw_glyph(frame: &mut Frame, cam: &crate::app::Camera, glyph: &fontmaker_core::Glyph) {
     // Even-odd so counters (holes) render no matter which order the
     // contours were drawn in.
     for contour in &glyph.contours {
@@ -457,6 +458,86 @@ fn glyph_advance(app: &App, name: &str) -> f64 {
 /// The canvas element sized to fill its container.
 pub fn canvas_widget(app: &App) -> Element<'_, Message> {
     Canvas::new(GlyphCanvas { app })
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+/// A large, clean render of the current glyph: fill only, no nodes or handles.
+///
+/// Read-only, so it keeps no state and publishes no messages: the fit is
+/// recomputed from the panel's own bounds every frame.
+pub struct PreviewCanvas<'a> {
+    pub app: &'a App,
+}
+
+impl Program<Message, Theme, iced::Renderer> for PreviewCanvas<'_> {
+    type State = ();
+
+    fn update(
+        &self,
+        _state: &mut Self::State,
+        _event: &canvas::Event,
+        _bounds: Rectangle,
+        _cursor: iced::mouse::Cursor,
+    ) -> Option<Action<Message>> {
+        None
+    }
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &iced::Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: iced::mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let mut frame = Frame::new(renderer, bounds.size());
+        frame.fill_rectangle(Point::ORIGIN, bounds.size(), PREVIEW_BG);
+
+        let doc = &self.app.doc;
+        let glyph = doc.glyph(&self.app.current);
+        let ink = glyph.and_then(|g| g.bounds());
+
+        // Frame the ink, but always include the baseline and cap height so the
+        // letter is seen in the context of its metrics.
+        let (x0, y0, x1, y1) = match ink {
+            Some(b) => (
+                b.x0.min(-20.0),
+                b.y0.min(0.0),
+                b.x1.max(glyph.map(|g| g.advance).unwrap_or(0.0)),
+                b.y1.max(doc.metrics.cap_height),
+            ),
+            None => (
+                -50.0,
+                doc.metrics.descender,
+                glyph.map(|g| g.advance).unwrap_or(550.0),
+                doc.metrics.cap_height,
+            ),
+        };
+        let pad = 28.0;
+        let fw = ((x1 - x0).max(100.0)) as f32;
+        let fh = ((y1 - y0).max(100.0)) as f32;
+        let scale = ((bounds.width - 2.0 * pad) / fw)
+            .min((bounds.height - 2.0 * pad) / fh)
+            .clamp(0.01, 10.0);
+        let cam = crate::app::Camera {
+            scale,
+            origin_x: bounds.width / 2.0 - ((x0 + x1) / 2.0) as f32 * scale,
+            origin_y: bounds.height / 2.0 + ((y0 + y1) / 2.0) as f32 * scale,
+        };
+
+        draw_guides(&mut frame, &cam, glyph.map(|g| g.advance).unwrap_or(600.0), doc);
+        if let Some(g) = glyph {
+            draw_glyph(&mut frame, &cam, g);
+        }
+
+        vec![frame.into_geometry()]
+    }
+}
+
+/// The preview element, sized by its container.
+pub fn preview_canvas(app: &App) -> Element<'_, Message> {
+    Canvas::new(PreviewCanvas { app })
         .width(Length::Fill)
         .height(Length::Fill)
         .into()

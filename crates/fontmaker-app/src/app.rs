@@ -17,6 +17,8 @@ use crate::panels;
 
 /// How far, in screen pixels, the cursor must be to grab a node or handle.
 const HIT_RADIUS_PX: f32 = 10.0;
+/// How close, in screen pixels, a point must be to a guide to snap onto it.
+const SNAP_RADIUS_PX: f32 = 8.0;
 /// Directory exported fonts are written to.
 const OUT_DIR: &str = "out";
 /// File extension of the project JSON.
@@ -150,8 +152,35 @@ pub enum Message {
     AddGlyph,
     SetAdvance(f64),
     DeleteGlyph,
+    ToggleSnap,
+    FlipH,
+    FlipV,
+    SelectAllNodes,
+    ConvertNodes,
+    CopyOutline,
+    PasteOutline,
+    DuplicateGlyph,
+    AutoAdvance,
+    MetaChanged(MetaField, String),
+    SelectTab(RightTab),
     FitView,
     Canvas(CanvasMsg),
+}
+
+/// Editable fields of the font metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetaField {
+    Family,
+    Style,
+    Designer,
+    Version,
+}
+
+/// Which panel the right column shows under the preview.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RightTab {
+    Inspector,
+    Info,
 }
 
 /// Events forwarded from the canvas widget.
@@ -188,6 +217,18 @@ pub struct App {
     pub fit_pending: bool,
     pub last_size: (f32, f32),
     pub cursor_font: kurbo::Point,
+    /// Snap new and dragged points onto guides, the advance edges and
+    /// existing nodes.
+    pub snap: bool,
+    /// Last click, for double-click detection (insert point on segment).
+    last_click: Option<(std::time::Instant, kurbo::Point)>,
+    /// Set when a press-path mutation happened without starting a drag, so
+    /// release() knows to keep it in the undo history.
+    pending_change: bool,
+    /// Copied outlines, pasted into whichever glyph is current.
+    clipboard: Vec<Contour>,
+    /// Which panel shows under the preview.
+    pub right_tab: RightTab,
 }
 
 impl App {
@@ -215,6 +256,11 @@ impl App {
             fit_pending: true,
             last_size: (800.0, 600.0),
             cursor_font: kurbo::Point::ZERO,
+            snap: true,
+            last_click: None,
+            pending_change: false,
+            clipboard: Vec::new(),
+            right_tab: RightTab::Inspector,
         }
     }
 
@@ -338,6 +384,159 @@ impl App {
                 }
                 Task::none()
             }
+            Message::ToggleSnap => {
+                self.snap = !self.snap;
+                self.status = format!("Snapping {}.", if self.snap { "on" } else { "off" });
+                Task::none()
+            }
+            Message::FlipH => {
+                self.history.begin(&self.doc);
+                self.history.touch(&self.doc, &self.current);
+                let axis = self.doc.glyph(&self.current).map(|g| g.advance / 2.0).unwrap_or(0.0);
+                if let Some(g) = self.doc.glyph_mut(&self.current) {
+                    for c in &mut g.contours {
+                        fontmaker_core::mirror_x(&mut c.nodes, axis);
+                    }
+                }
+                self.history.commit(&self.doc);
+                self.status = "Flipped horizontally.".to_string();
+                Task::none()
+            }
+            Message::FlipV => {
+                self.history.begin(&self.doc);
+                self.history.touch(&self.doc, &self.current);
+                // Flip about the middle of the ink, or the midpoint between
+                // baseline and cap height for an empty glyph.
+                let axis = self
+                    .doc
+                    .glyph(&self.current)
+                    .and_then(|g| g.bounds())
+                    .map(|b| (b.y0 + b.y1) / 2.0)
+                    .unwrap_or(self.doc.metrics.cap_height / 2.0);
+                if let Some(g) = self.doc.glyph_mut(&self.current) {
+                    for c in &mut g.contours {
+                        fontmaker_core::mirror_y(&mut c.nodes, axis);
+                    }
+                }
+                self.history.commit(&self.doc);
+                self.status = "Flipped vertically.".to_string();
+                Task::none()
+            }
+            Message::SelectAllNodes => {
+                self.selection.clear();
+                if let Some(g) = self.doc.glyph(&self.current) {
+                    for (ci, c) in g.contours.iter().enumerate() {
+                        for ni in 0..c.nodes.len() {
+                            self.selection.push((ci, ni));
+                        }
+                    }
+                }
+                self.status = format!("Selected {} nodes.", self.selection.len());
+                Task::none()
+            }
+            Message::ConvertNodes => {
+                if self.selection.is_empty() {
+                    self.status = "Select nodes to convert (corner ↔ smooth).".to_string();
+                    return Task::none();
+                }
+                self.history.begin(&self.doc);
+                self.history.touch(&self.doc, &self.current);
+                let count = self.convert_selected_nodes();
+                self.history.commit(&self.doc);
+                self.status = format!(
+                    "Converted {} node(s): smooth ↔ corner.",
+                    count
+                );
+                Task::none()
+            }
+            Message::CopyOutline => {
+                self.clipboard = self
+                    .doc
+                    .glyph(&self.current)
+                    .map(|g| g.contours.clone())
+                    .unwrap_or_default();
+                self.status = if self.clipboard.is_empty() {
+                    format!("'{}' has no outlines to copy.", self.current)
+                } else {
+                    format!(
+                        "Copied {} contour(s) from '{}'. Select another glyph and paste.",
+                        self.clipboard.len(),
+                        self.current
+                    )
+                };
+                Task::none()
+            }
+            Message::PasteOutline => {
+                if self.clipboard.is_empty() {
+                    self.status = "Outline clipboard is empty.".to_string();
+                    return Task::none();
+                }
+                self.history.begin(&self.doc);
+                self.history.touch(&self.doc, &self.current);
+                let count = self.clipboard.len();
+                if let Some(g) = self.doc.glyph_mut(&self.current) {
+                    g.contours.extend(self.clipboard.iter().cloned());
+                }
+                self.history.commit(&self.doc);
+                self.status = format!("Pasted {count} contour(s) into '{}'.", self.current);
+                Task::none()
+            }
+            Message::DuplicateGlyph => {
+                let Some(source) = self.doc.glyph(&self.current).cloned() else {
+                    return Task::none();
+                };
+                // First free `name.copy`, `name.copy2`, ...
+                let mut n = 1;
+                let name = loop {
+                    let candidate = if n == 1 {
+                        format!("{}.copy", source.name)
+                    } else {
+                        format!("{}.copy{n}", source.name)
+                    };
+                    if !self.doc.glyphs.contains_key(&candidate) {
+                        break candidate;
+                    }
+                    n += 1;
+                };
+                let mut copy = Glyph::new(name.clone());
+                copy.contours = source.contours.clone();
+                copy.advance = source.advance;
+                copy.lsb = source.lsb;
+                self.doc.add_glyph(copy);
+                self.current = name.clone();
+                self.selection.clear();
+                self.status = format!("Duplicated '{}' as '{name}'.", source.name);
+                Task::none()
+            }
+            Message::AutoAdvance => {
+                let Some(bounds) = self.doc.glyph(&self.current).and_then(|g| g.bounds()) else {
+                    self.status = "Nothing drawn to measure.".to_string();
+                    return Task::none();
+                };
+                self.history.begin(&self.doc);
+                self.history.touch(&self.doc, &self.current);
+                let margin = self.doc.metrics.upem * 0.05;
+                if let Some(g) = self.doc.glyph_mut(&self.current) {
+                    g.lsb = bounds.x0;
+                    g.advance = (bounds.x1 + margin).max(1.0);
+                }
+                self.history.commit(&self.doc);
+                self.status = "Advance set from outline with a right margin.".to_string();
+                Task::none()
+            }
+            Message::MetaChanged(field, value) => {
+                match field {
+                    MetaField::Family => self.doc.meta.family_name = value,
+                    MetaField::Style => self.doc.meta.style_name = value,
+                    MetaField::Designer => self.doc.meta.designer = value,
+                    MetaField::Version => self.doc.meta.version = value,
+                }
+                Task::none()
+            }
+            Message::SelectTab(tab) => {
+                self.right_tab = tab;
+                Task::none()
+            }
             Message::FitView => {
                 self.refit();
                 Task::none()
@@ -393,6 +592,46 @@ impl App {
         (HIT_RADIUS_PX / self.camera.scale) as f64
     }
 
+    /// Snap `p` onto metric guides, the advance edges and existing nodes.
+    ///
+    /// Each axis snaps independently, which is how drawing programs behave:
+    /// a point near the baseline but mid-glyph snaps its y only.
+    pub fn snap_point(&self, p: kurbo::Point) -> kurbo::Point {
+        if !self.snap {
+            return p;
+        }
+        let threshold = (SNAP_RADIUS_PX / self.camera.scale) as f64;
+
+        let metrics = &self.doc.metrics;
+        let mut y_targets = vec![0.0, metrics.ascender, metrics.descender, metrics.cap_height, metrics.x_height];
+        let mut x_targets = vec![0.0, self.doc.glyph(&self.current).map(|g| g.advance).unwrap_or(0.0)];
+
+        // Existing nodes are targets too, so contours can be joined exactly.
+        if let Some(glyph) = self.doc.glyph(&self.current) {
+            for contour in &glyph.contours {
+                for node in &contour.nodes {
+                    x_targets.push(node.pos.x);
+                    y_targets.push(node.pos.y);
+                }
+            }
+        }
+
+        let snapped = |value: f64, targets: &[f64]| -> f64 {
+            targets
+                .iter()
+                .copied()
+                .min_by(|a, b| {
+                    (value - a).abs()
+                        .partial_cmp(&(value - b).abs())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .filter(|t| (value - t).abs() <= threshold)
+                .unwrap_or(value)
+        };
+
+        kurbo::Point::new(snapped(p.x, &x_targets), snapped(p.y, &y_targets))
+    }
+
     fn hit_node(&self, p: kurbo::Point) -> Option<(usize, usize)> {
         let glyph = self.doc.glyph(&self.current)?;
         let r = self.hit_radius_font();
@@ -427,6 +666,24 @@ impl App {
     }
 
     fn press(&mut self, p: kurbo::Point) {
+        // Double-click inserts a point on the nearest segment.
+        let now = std::time::Instant::now();
+        let is_double = self
+            .last_click
+            .take()
+            .map(|(t, q)| {
+                t.elapsed().as_millis() < 400
+                    && (q - p).hypot() <= (8.0 / self.camera.scale) as f64
+            })
+            .unwrap_or(false);
+        if is_double && matches!(self.tool, Tool::Select | Tool::Pen) {
+            self.last_click = None; // avoid triple-click re-triggering
+            if self.insert_point_at(p) {
+                return;
+            }
+        }
+        self.last_click = Some((now, p));
+
         match self.tool {
             Tool::Pan => {}
             Tool::Select => {
@@ -486,12 +743,41 @@ impl App {
         self.status = "Contour closed.".to_string();
     }
 
+    /// Double-click: split the nearest segment under `p` and insert a smooth
+    /// node there. Returns whether a point was inserted.
+    fn insert_point_at(&mut self, p: kurbo::Point) -> bool {
+        let radius = self.hit_radius_font();
+        let mut inserted: Option<(usize, usize)> = None;
+        {
+            let Some(glyph) = self.doc.glyph_mut(&self.current) else { return false };
+            'outer: for (ci, contour) in glyph.contours.iter_mut().enumerate() {
+                // Prefer the contour whose segment is genuinely closest: try
+                // every contour and keep the best hit.
+                if let Some(ni) = fontmaker_core::insert_point_on_segment(contour, p, radius) {
+                    inserted = Some((ci, ni));
+                    break 'outer;
+                }
+            }
+        }
+        match inserted {
+            Some((ci, ni)) => {
+                self.selection = vec![(ci, ni)];
+                self.history.touch(&self.doc, &self.current);
+                self.pending_change = true;
+                self.status = "Point inserted on segment.".to_string();
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Pen tool: append a point to the open contour, or start a new one.
     ///
     /// The new point becomes the drag target, so it follows the cursor for as
     /// long as the button is held down and lands exactly where it was clicked
     /// when it is not.
     fn pen_add_point(&mut self, p: kurbo::Point) {
+        let p = self.snap_point(p);
         let target = {
             let Some(glyph) = self.doc.glyph_mut(&self.current) else { return };
             let open = glyph
@@ -522,14 +808,19 @@ impl App {
             }
             Some(DragKind::Node { contour, node }) => {
                 self.history.touch(&self.doc, &self.current);
-                if let Some(n) = self
-                    .doc
-                    .glyph_mut(&self.current)
-                    .and_then(|g| g.contours.get_mut(contour))
-                    .and_then(|c| c.nodes.get_mut(node))
-                {
-                    let delta = font - n.pos;
-                    n.move_to(kurbo::Vec2::new(delta.x, delta.y));
+                let snapped = self.snap_point(font);
+                if let Some(old) = self.node_pos(contour, node) {
+                    // Dragging one node of a multi-selection moves them all,
+                    // like Illustrator.
+                    let dragging_selection = self.selection.len() > 1
+                        && self.selection.contains(&(contour, node));
+                    let targets: Vec<(usize, usize)> = if dragging_selection {
+                        self.selection.clone()
+                    } else {
+                        vec![(contour, node)]
+                    };
+                    let delta = snapped - old;
+                    self.move_nodes(&targets, delta);
                 }
             }
             Some(DragKind::Handle { contour, node, is_in }) => {
@@ -595,7 +886,14 @@ impl App {
                 self.history.commit(&self.doc);
             }
             None => {
-                self.history.abort();
+                // A click that mutated without dragging (double-click insert)
+                // still deserves an undo entry.
+                if self.pending_change {
+                    self.history.commit(&self.doc);
+                    self.pending_change = false;
+                } else {
+                    self.history.abort();
+                }
             }
         }
     }
@@ -691,6 +989,96 @@ impl App {
         self.selection.retain(|(c, _)| *c < len);
     }
 
+    /// Position of a node, if it exists.
+    fn node_pos(&self, contour: usize, node: usize) -> Option<kurbo::Point> {
+        self.doc
+            .glyph(&self.current)?
+            .contours
+            .get(contour)?
+            .nodes
+            .get(node)
+            .map(|n| n.pos)
+    }
+
+    /// Move a set of nodes (and their handles) by `delta`.
+    fn move_nodes(&mut self, targets: &[(usize, usize)], delta: kurbo::Vec2) {
+        let Some(glyph) = self.doc.glyph_mut(&self.current) else { return };
+        for (ci, ni) in targets {
+            if let Some(n) = glyph
+                .contours
+                .get_mut(*ci)
+                .and_then(|c| c.nodes.get_mut(*ni))
+            {
+                n.move_to(delta);
+            }
+        }
+    }
+
+    /// Toggle every selected node between corner and smooth.
+    ///
+    /// A corner becomes smooth by adding handles along the tangent through the
+    /// node; a smooth point becomes a corner by dropping its handles. Returns
+    /// the number of nodes touched.
+    fn convert_selected_nodes(&mut self) -> usize {
+        let selected = self.selection.clone();
+        let mut count = 0;
+        for (ci, ni) in &selected {
+            let Some(glyph) = self.doc.glyph(&self.current) else { return count };
+            let Some(contour) = glyph.contours.get(*ci) else { continue };
+            let n = contour.nodes.len();
+            if n < 2 {
+                continue;
+            }
+            let Some(node) = contour.nodes.get(*ni) else { continue };
+
+            if node.is_corner() {
+                // Tangent through the node: from the previous node towards the
+                // next, wrapping on closed contours.
+                let prev = if *ni == 0 {
+                    if contour.closed { n - 1 } else { 0 }
+                } else {
+                    ni - 1
+                };
+                let next = if *ni + 1 == n {
+                    if contour.closed { 0 } else { n - 1 }
+                } else {
+                    *ni + 1
+                };
+                let (pp, np) = (contour.nodes[prev].pos, contour.nodes[next].pos);
+                let tangent = np - pp;
+                let len = tangent.hypot();
+                if len < 1e-9 {
+                    continue;
+                }
+                let unit = tangent / len;
+                let handle_len = (node.pos - pp).hypot().min((np - node.pos).hypot()) / 3.0;
+                let in_h = node.pos - unit * handle_len;
+                let out_h = node.pos + unit * handle_len;
+                if let Some(target) = self
+                    .doc
+                    .glyph_mut(&self.current)
+                    .and_then(|g| g.contours.get_mut(*ci))
+                    .and_then(|c| c.nodes.get_mut(*ni))
+                {
+                    *target = Node::smooth(target.pos, in_h, out_h);
+                    count += 1;
+                }
+            } else {
+                // Smooth → corner: drop the handles.
+                if let Some(target) = self
+                    .doc
+                    .glyph_mut(&self.current)
+                    .and_then(|g| g.contours.get_mut(*ci))
+                    .and_then(|c| c.nodes.get_mut(*ni))
+                {
+                    *target = Node::corner(target.pos);
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
     // ---- persistence -----------------------------------------------------
 
     fn project_path(&self) -> String {
@@ -767,8 +1155,11 @@ impl App {
     pub fn view(&self) -> Element<'_, Message> {
         let bar = panels::toolbar(self);
         let grid = panels::glyph_grid(self);
-        let inspector = panels::inspector(self);
         let status = panels::status_bar(self);
+
+        // Right column: the large clean preview of the letter, with tabbed
+        // panels (inspector / font info) underneath it.
+        let right = panels::right_column(self);
 
         let canvas_area = column![
             canvas_view::canvas_widget(self),
@@ -779,7 +1170,7 @@ impl App {
 
         column![
             bar,
-            row![grid, canvas_area, inspector]
+            row![grid, canvas_area, right]
                 .width(iced::Length::Fill)
                 .height(iced::Length::Fill)
                 .spacing(4),
@@ -812,11 +1203,16 @@ fn key_message(event: keyboard::Event) -> Option<Message> {
                 (true, "s") => Some(Message::SaveProject),
                 (true, "e") => Some(Message::Export(ExportFormat::Ttf)),
                 (true, "0") => Some(Message::FitView),
+                (true, "a") => Some(Message::SelectAllNodes),
+                (true, "c") => Some(Message::CopyOutline),
+                (true, "v") => Some(Message::PasteOutline),
+                (true, "d") => Some(Message::DuplicateGlyph),
                 (false, "v") => Some(Message::SelectTool(Tool::Select)),
                 (false, "p") => Some(Message::SelectTool(Tool::Pen)),
                 (false, "r") => Some(Message::SelectTool(Tool::Rectangle)),
                 (false, "e") => Some(Message::SelectTool(Tool::Ellipse)),
                 (false, "h") => Some(Message::SelectTool(Tool::Pan)),
+                (false, "c") => Some(Message::ConvertNodes),
                 _ => None,
             }
         }

@@ -10,8 +10,9 @@ use fontmaker_core::glyph::{Form, Glyph, JoiningType};
 /// A letter of a script: its codepoint and how it joins its neighbours.
 ///
 /// Hebrew letters are all `NonJoining` here on purpose: Hebrew final forms are
-/// separate codepoints (׳ ׳ ׳ ׳£ ׳¥), so there are no OpenType `init/medi/fina`
-/// forms to generate ג€” one glyph per codepoint is the whole story.
+/// separate codepoints (final kaf, mem, nun, pe, tsadi), so there are no
+/// OpenType `init/medi/fina` forms to generate - one glyph per codepoint is
+/// the whole story.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Letter {
     pub code: u32,
@@ -175,7 +176,7 @@ pub fn preview_text(script: Script) -> &'static str {
         Script::Cyrillic => "׀ ׁƒ׀÷׀°׀²׀¸ׁ†ׁ‹ 123",
         Script::Greek => "־§־µ־¹־¼ֿ־½־µֿ‚ 123",
         Script::Arabic => "״³„״§… ״¹„ƒ…",
-        Script::Hebrew => "׳©׳׳•׳ 123",
+        Script::Hebrew => "שלום 123",
     }
 }
 
