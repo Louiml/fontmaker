@@ -542,3 +542,106 @@ pub fn preview_canvas(app: &App) -> Element<'_, Message> {
         .height(Length::Fill)
         .into()
 }
+/// Live preview of a kerning pair: the two glyphs laid out with the kern
+/// value applied between them.
+///
+/// Read-only like [`PreviewCanvas`]: fits per frame, no messages.
+pub struct KernCanvas<'a> {
+    pub app: &'a App,
+}
+
+impl Program<Message, Theme, iced::Renderer> for KernCanvas<'_> {
+    type State = ();
+
+    fn update(
+        &self,
+        _state: &mut Self::State,
+        _event: &canvas::Event,
+        _bounds: Rectangle,
+        _cursor: iced::mouse::Cursor,
+    ) -> Option<Action<Message>> {
+        None
+    }
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &iced::Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: iced::mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let mut frame = Frame::new(renderer, bounds.size());
+        frame.fill_rectangle(Point::ORIGIN, bounds.size(), PREVIEW_BG);
+
+        let doc = &self.app.doc;
+        let left = doc.glyph(&self.app.kern_left);
+        let right = doc.glyph(&self.app.kern_right);
+        let (Some(left), Some(right)) = (left, right) else {
+            return vec![frame.into_geometry()];
+        };
+
+        let kern = doc.kern_value(&self.app.kern_left, &self.app.kern_right);
+        let right_offset = left.advance + kern;
+
+        // Combined ink of both glyphs: left as-is, right translated.
+        let mut bounds_font: Option<(f64, f64, f64, f64)> = None;
+        let mut extend = |b: Option<kurbo::Rect>, dx: f64| {
+            if let Some(b) = b {
+                let (x0, y0, x1, y1) = (b.x0 + dx, b.y0, b.x1 + dx, b.y1);
+                bounds_font = Some(match bounds_font {
+                    Some((ex0, ey0, ex1, ey1)) => (ex0.min(x0), ey0.min(y0), ex1.max(x1), ey1.max(y1)),
+                    None => (x0, y0, x1, y1),
+                });
+            }
+        };
+        extend(left.bounds(), 0.0);
+        extend(right.bounds(), right_offset);
+        // Always include baseline for context.
+        let (x0, y0, x1, y1) = bounds_font
+            .map(|(x0, y0, x1, y1)| (x0, y0.min(0.0), x1, y1.max(doc.metrics.cap_height)))
+            .unwrap_or((-50.0, doc.metrics.descender, 600.0, doc.metrics.cap_height));
+
+        let pad = 20.0;
+        let fw = ((x1 - x0).max(100.0)) as f32;
+        let fh = ((y1 - y0).max(100.0)) as f32;
+        let scale = ((bounds.width - 2.0 * pad) / fw)
+            .min((bounds.height - 2.0 * pad) / fh)
+            .clamp(0.01, 10.0);
+        let cam = crate::app::Camera {
+            scale,
+            origin_x: bounds.width / 2.0 - ((x0 + x1) / 2.0) as f32 * scale,
+            origin_y: bounds.height / 2.0 + ((y0 + y1) / 2.0) as f32 * scale,
+        };
+
+        draw_guides(&mut frame, &cam, x1 - x0, doc);
+        draw_glyph(&mut frame, &cam, left);
+        // Right glyph, translated by the advance plus the kern.
+        let shifted = {
+            let mut g = right.clone();
+            for contour in &mut g.contours {
+                for node in &mut contour.nodes {
+                    node.pos.x += right_offset;
+                    if let Some(h) = &mut node.in_handle {
+                        h.x += right_offset;
+                    }
+                    if let Some(h) = &mut node.out_handle {
+                        h.x += right_offset;
+                    }
+                }
+            }
+            g
+        };
+        draw_glyph(&mut frame, &cam, &shifted);
+
+        vec![frame.into_geometry()]
+    }
+}
+
+/// The kerning pair preview element, sized by its container.
+pub fn kern_canvas(app: &App) -> Element<'_, Message> {
+    Canvas::new(KernCanvas { app })
+        .width(Length::Fill)
+        .height(Length::Fixed(120.0))
+        .into()
+}

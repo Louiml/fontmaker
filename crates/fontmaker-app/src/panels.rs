@@ -170,6 +170,9 @@ pub fn right_column(app: &App) -> Element<'_, Message> {
         button(text("Glyph").size(13))
             .on_press(Message::SelectTab(RightTab::Inspector))
             .padding(Padding::from(5)),
+        button(text("Kerning").size(13))
+            .on_press(Message::SelectTab(RightTab::Kerning))
+            .padding(Padding::from(5)),
         button(text("Font info").size(13))
             .on_press(Message::SelectTab(RightTab::Info))
             .padding(Padding::from(5)),
@@ -179,6 +182,7 @@ pub fn right_column(app: &App) -> Element<'_, Message> {
     let content = match app.right_tab {
         RightTab::Inspector => inspector(app),
         RightTab::Info => font_info(app),
+        RightTab::Kerning => kerning_panel(app),
     };
 
     column![
@@ -278,6 +282,68 @@ pub fn inspector(app: &App) -> Element<'_, Message> {
                 .padding(Padding::from(5)),
         ]
         .spacing(6)
+        .width(210),
+        Length::Fill,
+    )
+}
+
+/// The kerning pair editor.
+pub fn kerning_panel(app: &App) -> Element<'_, Message> {
+    let glyphs: Vec<String> = app.doc.glyph_order.clone();
+
+    let left_pick = pick_list(glyphs.clone(), Some(app.kern_left.clone()), Message::SelectKernLeft)
+        .width(190)
+        .padding(4);
+    let right_pick = pick_list(glyphs, Some(app.kern_right.clone()), Message::SelectKernRight)
+        .width(190)
+        .padding(4);
+
+    let value = app.doc.kern_value(&app.kern_left, &app.kern_right);
+    let slider_row = row![
+        text("kern").size(13),
+        slider(-500.0..=500.0, value, Message::KernValueChanged).width(110),
+        text(format!("{value:.0}")).size(13),
+    ]
+    .spacing(6)
+    .align_y(iced::alignment::Vertical::Center);
+
+    // Existing pairs, most recently added last. Clicking one loads it into
+    // the editors above.
+    let mut rows = column![].spacing(2);
+    for (i, (l, r, v)) in app.doc.kerning.iter().enumerate() {
+        let selected = app.kern_selected == Some(i);
+        let label = if selected {
+            format!("[{l} {r}]  {v:.0}")
+        } else {
+            format!(" {l} {r}   {v:.0}")
+        };
+        rows = rows.push(
+            button(text(label).size(13))
+                .on_press(Message::SelectKernPair(i))
+                .width(190)
+                .padding(Padding::from(3)),
+        );
+    }
+    let pair_count = app.doc.kerning.len();
+
+    let delete = button(text("Delete pair").size(12))
+        .on_press_maybe(if app.kern_selected.is_some() { Some(Message::DeleteKernPair) } else { None })
+        .padding(Padding::from(5));
+
+    panel(
+        column![
+            text("Kerning").size(14),
+            text("left").size(11),
+            left_pick,
+            text("right").size(11),
+            right_pick,
+            slider_row,
+            crate::canvas_view::kern_canvas(app),
+            delete,
+            text(format!("{} pair(s)", pair_count)).size(12),
+            scrollable(rows).height(Length::Fill),
+        ]
+        .spacing(5)
         .width(210),
         Length::Fill,
     )

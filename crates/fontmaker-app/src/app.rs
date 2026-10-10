@@ -163,6 +163,11 @@ pub enum Message {
     AutoAdvance,
     MetaChanged(MetaField, String),
     SelectTab(RightTab),
+    SelectKernLeft(String),
+    SelectKernRight(String),
+    KernValueChanged(f64),
+    SelectKernPair(usize),
+    DeleteKernPair,
     FitView,
     Canvas(CanvasMsg),
 }
@@ -181,6 +186,7 @@ pub enum MetaField {
 pub enum RightTab {
     Inspector,
     Info,
+    Kerning,
 }
 
 /// Events forwarded from the canvas widget.
@@ -229,6 +235,12 @@ pub struct App {
     clipboard: Vec<Contour>,
     /// Which panel shows under the preview.
     pub right_tab: RightTab,
+    /// Left glyph of the kerning pair being edited.
+    pub kern_left: String,
+    /// Right glyph of the kerning pair being edited.
+    pub kern_right: String,
+    /// Index into `doc.kerning` of the pair selected in the list, if any.
+    pub kern_selected: Option<usize>,
 }
 
 impl App {
@@ -241,10 +253,17 @@ impl App {
             .find(|n| n.as_str() != ".notdef")
             .cloned()
             .unwrap_or_else(|| ".notdef".to_string());
+        let kern_right = doc
+            .glyph_order
+            .iter()
+            .skip_while(|n| n.as_str() != current)
+            .nth(1)
+            .cloned()
+            .unwrap_or_else(|| current.clone());
         Self {
             doc,
             history: History::default(),
-            current,
+            current: current.clone(),
             tool: Tool::Select,
             camera: Camera { scale: 0.4, origin_x: 300.0, origin_y: 500.0 },
             drag: None,
@@ -261,6 +280,9 @@ impl App {
             pending_change: false,
             clipboard: Vec::new(),
             right_tab: RightTab::Inspector,
+            kern_left: current.clone(),
+            kern_right,
+            kern_selected: None,
         }
     }
 
@@ -535,6 +557,48 @@ impl App {
             }
             Message::SelectTab(tab) => {
                 self.right_tab = tab;
+                Task::none()
+            }
+            Message::SelectKernLeft(name) => {
+                if self.doc.glyphs.contains_key(&name) {
+                    self.kern_left = name;
+                    self.kern_selected = None;
+                }
+                Task::none()
+            }
+            Message::SelectKernRight(name) => {
+                if self.doc.glyphs.contains_key(&name) {
+                    self.kern_right = name;
+                    self.kern_selected = None;
+                }
+                Task::none()
+            }
+            Message::KernValueChanged(value) => {
+                let value = value.clamp(-2000.0, 2000.0);
+                self.doc
+                    .set_kern(&self.kern_left.clone(), &self.kern_right.clone(), value);
+                self.kern_selected = None;
+                Task::none()
+            }
+            Message::SelectKernPair(index) => {
+                if let Some((l, r, _)) = self.doc.kerning.get(index) {
+                    self.kern_left = l.clone();
+                    self.kern_right = r.clone();
+                    self.kern_selected = Some(index);
+                    self.status = format!("Editing kerning pair {l} {r}.");
+                }
+                Task::none()
+            }
+            Message::DeleteKernPair => {
+                if let Some(index) = self.kern_selected {
+                    if index < self.doc.kerning.len() {
+                        let (l, r, _) = self.doc.kerning.remove(index);
+                        self.kern_selected = None;
+                        self.status = format!("Deleted kerning pair {l} {r}.");
+                    }
+                } else {
+                    self.status = "Select a kerning pair first.".to_string();
+                }
                 Task::none()
             }
             Message::FitView => {
