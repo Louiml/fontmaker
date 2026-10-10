@@ -144,6 +144,10 @@ impl Program<Message, Theme, iced::Renderer> for GlyphCanvas<'_> {
 
         frame.fill_rectangle(Point::ORIGIN, bounds.size(), BACKGROUND);
 
+        if let Some(reference) = self.app.reference.as_ref().filter(|r| r.visible) {
+            draw_reference(&mut frame, cam, reference, self.app);
+        }
+
         if let Some(glyph) = self.app.doc.glyph(&self.app.current) {
             draw_guides(&mut frame, cam, glyph.advance, &self.app.doc);
             draw_glyph(&mut frame, cam, glyph);
@@ -232,7 +236,55 @@ pub(crate) fn draw_guides(frame: &mut Frame, cam: &crate::app::Camera, advance: 
     }
 }
 
-pub(crate) fn draw_glyph(frame: &mut Frame, cam: &crate::app::Camera, glyph: &fontmaker_core::Glyph) {
+/// The reference image, fitted aspect-preserving into the glyph's metrics box
+/// (the advance width plus margins, from descender to ascender) and drawn at
+/// reduced opacity so the outline reads on top of it.
+fn draw_reference(
+    frame: &mut Frame,
+    cam: &crate::app::Camera,
+    reference: &crate::app::ReferenceImage,
+    app: &App,
+) {
+    let doc = &app.doc;
+    let advance = doc.glyph(&app.current).map(|g| g.advance).unwrap_or(600.0);
+    let metrics = &doc.metrics;
+    let margin = advance * 0.2;
+
+    let box_x0 = -margin;
+    let box_x1 = advance + margin;
+    let box_y0 = metrics.descender;
+    let box_y1 = metrics.ascender;
+    let box_w = (box_x1 - box_x0).max(1.0);
+    let box_h = (box_y1 - box_y0).max(1.0);
+
+    // Aspect-preserving fit, centred in the box.
+    let img_w = reference.width.max(1) as f64;
+    let img_h = reference.height.max(1) as f64;
+    let fit = (box_w / img_w).min(box_h / img_h);
+    let draw_w = img_w * fit;
+    let draw_h = img_h * fit;
+    let dx = box_x0 + (box_w - draw_w) / 2.0;
+    let dy = box_y0 + (box_h - draw_h) / 2.0;
+
+    // The image's top-left in font space is (dx, dy + draw_h); screen y flips.
+    let top_left = cam.to_screen(kurbo::Point::new(dx, dy + draw_h));
+    let size = Size::new(
+        (draw_w * cam.scale as f64) as f32,
+        (draw_h * cam.scale as f64) as f32,
+    );
+
+    let image = canvas::Image {
+        handle: reference.handle.clone(),
+        filter_method: Default::default(),
+        rotation: iced::Radians(0.0),
+        border_radius: Default::default(),
+        opacity: 0.45,
+        snap: false,
+    };
+    frame.draw_image(iced::Rectangle::new(top_left, size), image);
+}
+
+fn draw_glyph(frame: &mut Frame, cam: &crate::app::Camera, glyph: &fontmaker_core::Glyph) {
     // Even-odd so counters (holes) render no matter which order the
     // contours were drawn in.
     for contour in &glyph.contours {

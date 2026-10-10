@@ -168,6 +168,11 @@ pub enum Message {
     KernValueChanged(f64),
     SelectKernPair(usize),
     DeleteKernPair,
+    LoadReference,
+    ToggleReference,
+    ClearReference,
+    RenameGlyphChanged(String),
+    RenameGlyphSubmit,
     FitView,
     Canvas(CanvasMsg),
 }
@@ -241,6 +246,23 @@ pub struct App {
     pub kern_right: String,
     /// Index into `doc.kerning` of the pair selected in the list, if any.
     pub kern_selected: Option<usize>,
+    /// Loaded reference image (a sketch, screenshot, etc.) drawn behind the
+    /// editing canvas.
+    pub reference: Option<ReferenceImage>,
+    /// Buffer for the rename text input in the inspector.
+    pub rename_buffer: String,
+}
+
+/// A reference image loaded from disk.
+#[derive(Debug, Clone)]
+pub struct ReferenceImage {
+    pub handle: iced::widget::image::Handle,
+    pub width: u32,
+    pub height: u32,
+    /// Kept for the status line and future per-session reloads.
+    #[allow(dead_code)]
+    pub path: String,
+    pub visible: bool,
 }
 
 impl App {
@@ -283,6 +305,8 @@ impl App {
             kern_left: current.clone(),
             kern_right,
             kern_selected: None,
+            reference: None,
+            rename_buffer: current,
         }
     }
 
@@ -295,6 +319,7 @@ impl App {
                     self.marquee = None;
                     self.fit_pending = true;
                     self.refit();
+                    self.rename_buffer = self.current.clone();
                     self.status = format!("Editing {}", self.current);
                 }
                 Task::none()
@@ -598,6 +623,69 @@ impl App {
                     }
                 } else {
                     self.status = "Select a kerning pair first.".to_string();
+                }
+                Task::none()
+            }
+            Message::LoadReference => {
+                let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Images", &["png", "jpg", "jpeg"])
+                    .set_title("Load reference image")
+                    .pick_file()
+                else {
+                    return Task::none();
+                };
+                let bytes = match std::fs::read(&path) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        self.status = format!("Could not read image: {e}");
+                        return Task::none();
+                    }
+                };
+                let (width, height) = match image::load_from_memory(&bytes) {
+                    Ok(img) => (img.width(), img.height()),
+                    Err(e) => {
+                        self.status = format!("Unsupported image: {e}");
+                        return Task::none();
+                    }
+                };
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                self.reference = Some(ReferenceImage {
+                    handle: iced::widget::image::Handle::from_bytes(bytes),
+                    width,
+                    height,
+                    path: path.display().to_string(),
+                    visible: true,
+                });
+                self.status = format!("Reference loaded: {name} ({width}x{height}). It is drawn behind the glyph, fitted to the metrics box.");
+                Task::none()
+            }
+            Message::ToggleReference => {
+                if let Some(reference) = &mut self.reference {
+                    reference.visible = !reference.visible;
+                }
+                Task::none()
+            }
+            Message::ClearReference => {
+                self.reference = None;
+                self.status = "Reference removed.".to_string();
+                Task::none()
+            }
+            Message::RenameGlyphChanged(value) => {
+                self.rename_buffer = value;
+                Task::none()
+            }
+            Message::RenameGlyphSubmit => {
+                let new = self.rename_buffer.trim().to_string();
+                match self.doc.rename_glyph(&self.current.clone(), &new) {
+                    Ok(()) => {
+                        self.current = new.clone();
+                        self.rename_buffer = new.clone();
+                        self.status = format!("Renamed to '{new}'.");
+                    }
+                    Err(e) => self.status = format!("Rename failed: {e}"),
                 }
                 Task::none()
             }

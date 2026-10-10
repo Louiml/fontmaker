@@ -12,7 +12,9 @@ fontmaker-core.workspace = true
 fontmaker-script.workspace = true
 fontmaker-export.workspace = true
 kurbo.workspace = true
+rfd = "0.17"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 [dependencies.iced]
 version = "0.14"
-features = ["tiny-skia", "canvas", "advanced"]
+features = ["tiny-skia", "canvas", "image", "advanced"]

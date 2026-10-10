@@ -68,12 +68,30 @@ pub fn toolbar(app: &App) -> Element<'_, Message> {
         button(text(".woff2").size(13)).on_press(Message::Export(ExportFormat::Woff2)).padding(Padding::from(6)),
     ].spacing(2);
 
+    let loaded = app.reference.is_some();
+    let reference = row![
+        button(text("Ref...").size(13))
+            .on_press(Message::LoadReference)
+            .padding(Padding::from(6)),
+        button(text(if loaded && app.reference.as_ref().is_some_and(|r| r.visible) {
+            "Ref: on"
+        } else {
+            "Ref: off"
+        }).size(13))
+            .on_press_maybe(if loaded { Some(Message::ToggleReference) } else { None })
+            .padding(Padding::from(6)),
+        button(text("Ref: clear").size(13))
+            .on_press_maybe(if loaded { Some(Message::ClearReference) } else { None })
+            .padding(Padding::from(6)),
+    ].spacing(2);
+
     row![
         text("FontMaker").size(16),
         script_pick,
         tools,
         file,
         export,
+        reference,
     ]
     .spacing(10)
     .padding(Padding { top: 6.0, bottom: 6.0, left: 8.0, right: 8.0 })
@@ -256,6 +274,18 @@ pub fn inspector(app: &App) -> Element<'_, Message> {
     ]
     .spacing(4);
 
+    let rename_row = row![
+        text_input("name", &app.rename_buffer)
+            .on_input(Message::RenameGlyphChanged)
+            .on_submit(Message::RenameGlyphSubmit)
+            .width(140)
+            .size(12),
+        button(text("Rename").size(12))
+            .on_press(Message::RenameGlyphSubmit)
+            .padding(Padding::from(4)),
+    ]
+    .spacing(4);
+
     let edit_buttons = row![
         button(text("Corner/Smooth").size(12))
             .on_press(Message::ConvertNodes)
@@ -275,6 +305,7 @@ pub fn inspector(app: &App) -> Element<'_, Message> {
             advance_row,
             contours,
             forms,
+            rename_row,
             metric_buttons,
             edit_buttons,
             button(text("Delete glyph").size(12))

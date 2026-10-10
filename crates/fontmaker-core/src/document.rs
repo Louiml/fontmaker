@@ -280,6 +280,57 @@ impl Document {
         self.glyphs.remove(name)
     }
 
+    /// Rename a glyph and update every reference to it: the glyph order, the
+    /// charset and all kerning pairs.
+    ///
+    /// Positional form glyphs (`A.init` etc.) are separate glyphs and are NOT
+    /// renamed along with their base letter; rename them individually.
+    pub fn rename_glyph(&mut self, old: &str, new: &str) -> Result<(), String> {
+        if old == new {
+            return Ok(());
+        }
+        let new = new.trim();
+        if new.is_empty() {
+            return Err("The new name is empty.".to_string());
+        }
+        if new.contains(|c: char| c.is_whitespace()) {
+            return Err("Glyph names cannot contain whitespace.".to_string());
+        }
+        if new == ".notdef" || new == "space" {
+            return Err(format!("'{new}' is reserved."));
+        }
+        if !self.glyphs.contains_key(old) {
+            return Err(format!("No glyph named '{old}'."));
+        }
+        if self.glyphs.contains_key(new) {
+            return Err(format!("'{new}' already exists."));
+        }
+
+        let mut glyph = self.glyphs.remove(old).expect("checked above");
+        glyph.name = new.to_string();
+        self.glyphs.insert(new.to_string(), glyph);
+
+        for name in &mut self.glyph_order {
+            if name == old {
+                *name = new.to_string();
+            }
+        }
+        for entry in &mut self.charset {
+            if entry.glyph == old {
+                entry.glyph = new.to_string();
+            }
+        }
+        for (left, right, _) in &mut self.kerning {
+            if left == old {
+                *left = new.to_string();
+            }
+            if right == old {
+                *right = new.to_string();
+            }
+        }
+        Ok(())
+    }
+
     pub fn glyph(&self, name: &str) -> Option<&Glyph> {
         self.glyphs.get(name)
     }
@@ -417,6 +468,44 @@ mod tests {
         assert_eq!(doc.kern_value("A", "V"), -80.0);
         doc.set_kern("A", "V", 0.0);
         assert_eq!(doc.kerning.len(), 1, "zeroed pairs are kept but reset");
+    }
+
+    #[test]
+    fn rename_updates_every_reference() {
+        let mut doc = Document::default();
+        doc.add_glyph(Glyph::new("A").with_char('A'));
+        doc.add_glyph(Glyph::new("V"));
+        doc.charset.push(CharsetEntry {
+            codepoint: 0x41,
+            glyph: "A".into(),
+            joining: Default::default(),
+            transparent: false,
+        });
+        doc.set_kern("A", "V", -70.0);
+
+        doc.rename_glyph("A", "Ay").unwrap();
+        assert!(doc.glyph("Ay").is_some());
+        assert!(doc.glyph("A").is_none());
+        assert_eq!(doc.glyph("Ay").unwrap().name, "Ay");
+        assert!(doc.glyph_order.contains(&"Ay".to_string()));
+        assert_eq!(doc.charset[0].glyph, "Ay");
+        assert_eq!(doc.kern_value("Ay", "V"), -70.0, "kerning pairs follow the rename");
+        assert_eq!(doc.kern_value("A", "V"), 0.0);
+    }
+
+    #[test]
+    fn rename_rejects_bad_names() {
+        let mut doc = Document::default();
+        doc.add_glyph(Glyph::new("A"));
+        doc.add_glyph(Glyph::new("B"));
+
+        assert!(doc.rename_glyph("A", "").is_err(), "empty name");
+        assert!(doc.rename_glyph("A", "a b").is_err(), "whitespace");
+        assert!(doc.rename_glyph("A", "B").is_err(), "existing name");
+        assert!(doc.rename_glyph("A", "space").is_err(), "reserved");
+        assert!(doc.rename_glyph("Z", "Q").is_err(), "unknown glyph");
+        // Nothing was changed by the failed attempts.
+        assert!(doc.glyph("A").is_some());
     }
 
     #[test]
