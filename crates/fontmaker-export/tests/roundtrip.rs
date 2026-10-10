@@ -7,7 +7,7 @@
 use fontmaker_core::stroke::{ellipse, rectangle};
 use fontmaker_core::{Document, Glyph};
 use fontmaker_export::{export, ExportFormat, ttf, woff2};
-use font_types::{GlyphId, NameId};
+use font_types::{GlyphId, GlyphId16, NameId};
 use read_fonts::tables::{
     glyf::Glyph as TtGlyph,
     head::Head,
@@ -172,6 +172,74 @@ fn zero_glyph_has_an_oval() {
         }
         _ => panic!("zero should be a simple glyph"),
     }
+}
+
+#[test]
+fn composite_glyphs_export_and_read_back() {
+    use fontmaker_core::Component;
+
+    let mut doc = Document::default();
+    doc.meta.family_name = "Comp Face".into();
+
+    let mut a = Glyph::new("A").with_char('A');
+    a.contours.push(rectangle(0.0, 0.0, 300.0, 700.0));
+    a.advance = 320.0;
+    doc.add_glyph(a);
+
+    let mut marks = Glyph::new("dieresis");
+    marks.contours.push(rectangle(0.0, 750.0, 100.0, 850.0));
+    marks.advance = 100.0;
+    doc.add_glyph(marks);
+
+    // Ä = A + dieresis raised 200 units and squeezed horizontally.
+    let mut adieresis = Glyph::new("Adieresis").with_char('\u{00C4}');
+    adieresis.components.push(Component::new("A", 0.0, 0.0));
+    adieresis.components.push(Component {
+        glyph: "dieresis".into(),
+        offset: (110.0, 200.0),
+        scale: (0.5, 1.0),
+    });
+    adieresis.advance = 320.0;
+    doc.add_glyph(adieresis);
+
+    let bytes = export(&doc, ExportFormat::Ttf).unwrap();
+    let font = font_ref(&bytes);
+    let glyf = font.glyf().unwrap();
+    let loca = font.loca(None).unwrap();
+
+    // .notdef(0), space(1), A(2), dieresis(3), Adieresis(4).
+    let adie = loca.get(GlyphId::new(4), &glyf).and_then(|g| g.into_glyph()).unwrap();
+    let read_fonts::tables::glyf::Glyph::Composite(composite) = adie else {
+        panic!("Adieresis should export as a composite glyph");
+    };
+    let components: Vec<_> = composite.components().collect();
+    assert_eq!(components.len(), 2);
+
+    // First component: A at (0, 0).
+    assert_eq!(components[0].glyph, GlyphId16::new(2), "A is gid 2");
+    match components[0].anchor {
+        read_fonts::tables::glyf::Anchor::Offset { x, y } => {
+            assert_eq!((x, y), (0, 0));
+        }
+        _ => panic!("expected an offset anchor"),
+    }
+
+    // Second component: dieresis (gid 3) at (110, 200), squeezed in x.
+    assert_eq!(components[1].glyph, GlyphId16::new(3));
+    match components[1].anchor {
+        read_fonts::tables::glyf::Anchor::Offset { x, y } => {
+            assert_eq!((x, y), (110, 200));
+        }
+        _ => panic!("expected an offset anchor"),
+    }
+    assert!(
+        (components[1].transform.xx.to_f32() - 0.5).abs() < 0.001,
+        "x scale 0.5"
+    );
+
+    // The composite maps U+00C4 in the cmap.
+    let cmap = font.cmap().unwrap();
+    assert_eq!(cmap.map_codepoint('\u{00C4}'), Some(GlyphId::new(4)));
 }
 
 #[test]

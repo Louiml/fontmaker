@@ -20,6 +20,9 @@ const PREVIEW_BG: Color = Color::from_rgb8(0x17, 0x17, 0x1b);
 const BASELINE: Color = Color::from_rgb8(0x3d, 0x6a, 0x7a);
 const METRIC_LINE: Color = Color::from_rgb8(0x27, 0x3c, 0x46);
 const INK: Color = Color::from_rgb8(0xdd, 0xdd, 0xdd);
+/// Component outlines are references to other glyphs; drawing them dimmer
+/// makes the boundary between owned and borrowed outlines visible.
+const COMPONENT_INK: Color = Color::from_rgb8(0x8f, 0xa6, 0xb0);
 const INK_PREVIEW: Color = Color::from_rgb8(0x55, 0x60, 0x66);
 const NODE: Color = Color::from_rgb8(0x4f, 0xc3, 0xf7);
 const NODE_SELECTED: Color = Color::from_rgb8(0xff, 0xeb, 0x3b);
@@ -150,7 +153,7 @@ impl Program<Message, Theme, iced::Renderer> for GlyphCanvas<'_> {
 
         if let Some(glyph) = self.app.doc.glyph(&self.app.current) {
             draw_guides(&mut frame, cam, glyph.advance, &self.app.doc);
-            draw_glyph(&mut frame, cam, glyph);
+            draw_resolved(&mut frame, cam, &self.app.doc, &self.app.current);
             draw_nodes(&mut frame, cam, glyph, &self.app.selection);
             draw_overlays(&mut frame, cam, self.app);
         } else {
@@ -284,29 +287,42 @@ fn draw_reference(
     frame.draw_image(iced::Rectangle::new(top_left, size), image);
 }
 
-fn draw_glyph(frame: &mut Frame, cam: &crate::app::Camera, glyph: &fontmaker_core::Glyph) {
-    // Even-odd so counters (holes) render no matter which order the
-    // contours were drawn in.
-    for contour in &glyph.contours {
+
+/// Draw a glyph with its components resolved: own outlines in full ink,
+/// component outlines dimmer so borrowed geometry reads as borrowed.
+pub(crate) fn draw_resolved(
+    frame: &mut Frame,
+    cam: &crate::app::Camera,
+    doc: &fontmaker_core::Document,
+    name: &str,
+) {
+    let fill = |frame: &mut Frame, contour: &fontmaker_core::Contour, color: Color| {
         if contour.nodes.is_empty() {
-            continue;
+            return;
         }
         let path = contour_path(cam, contour);
         frame.fill(
             &path,
             canvas::Fill {
-                style: canvas::Style::Solid(INK),
+                style: canvas::Style::Solid(color),
                 rule: canvas::fill::Rule::EvenOdd,
             },
         );
-    }
-    // Show open contours as outlines while drawing.
+    };
+
+    let Some(glyph) = doc.glyph(name) else { return };
     for contour in &glyph.contours {
+        fill(frame, contour, INK);
         if !contour.closed {
             frame.stroke(
                 &contour_path(cam, contour),
                 Stroke::default().with_color(NODE).with_width(1.5),
             );
+        }
+    }
+    for component in &glyph.components {
+        for contour in doc.resolve_glyph(&component.glyph) {
+            fill(frame, &contour, COMPONENT_INK);
         }
     }
 }
@@ -548,7 +564,7 @@ impl Program<Message, Theme, iced::Renderer> for PreviewCanvas<'_> {
 
         let doc = &self.app.doc;
         let glyph = doc.glyph(&self.app.current);
-        let ink = glyph.and_then(|g| g.bounds());
+        let ink = doc.resolved_bounds(&self.app.current);
 
         // Frame the ink, but always include the baseline and cap height so the
         // letter is seen in the context of its metrics.
@@ -579,9 +595,7 @@ impl Program<Message, Theme, iced::Renderer> for PreviewCanvas<'_> {
         };
 
         draw_guides(&mut frame, &cam, glyph.map(|g| g.advance).unwrap_or(600.0), doc);
-        if let Some(g) = glyph {
-            draw_glyph(&mut frame, &cam, g);
-        }
+        draw_resolved(&mut frame, &cam, doc, &self.app.current);
 
         vec![frame.into_geometry()]
     }
@@ -628,15 +642,15 @@ impl Program<Message, Theme, iced::Renderer> for KernCanvas<'_> {
 
         let doc = &self.app.doc;
         let left = doc.glyph(&self.app.kern_left);
-        let right = doc.glyph(&self.app.kern_right);
-        let (Some(left), Some(right)) = (left, right) else {
+        let (Some(left), Some(_)) = (left, doc.glyph(&self.app.kern_right)) else {
             return vec![frame.into_geometry()];
         };
 
         let kern = doc.kern_value(&self.app.kern_left, &self.app.kern_right);
         let right_offset = left.advance + kern;
 
-        // Combined ink of both glyphs: left as-is, right translated.
+        // Combined ink of both glyphs (components resolved): left as-is,
+        // right translated.
         let mut bounds_font: Option<(f64, f64, f64, f64)> = None;
         let mut extend = |b: Option<kurbo::Rect>, dx: f64| {
             if let Some(b) = b {
@@ -647,8 +661,8 @@ impl Program<Message, Theme, iced::Renderer> for KernCanvas<'_> {
                 });
             }
         };
-        extend(left.bounds(), 0.0);
-        extend(right.bounds(), right_offset);
+        extend(doc.resolved_bounds(&self.app.kern_left), 0.0);
+        extend(doc.resolved_bounds(&self.app.kern_right), right_offset);
         // Always include baseline for context.
         let (x0, y0, x1, y1) = bounds_font
             .map(|(x0, y0, x1, y1)| (x0, y0.min(0.0), x1, y1.max(doc.metrics.cap_height)))
@@ -667,24 +681,15 @@ impl Program<Message, Theme, iced::Renderer> for KernCanvas<'_> {
         };
 
         draw_guides(&mut frame, &cam, x1 - x0, doc);
-        draw_glyph(&mut frame, &cam, left);
-        // Right glyph, translated by the advance plus the kern.
-        let shifted = {
-            let mut g = right.clone();
-            for contour in &mut g.contours {
-                for node in &mut contour.nodes {
-                    node.pos.x += right_offset;
-                    if let Some(h) = &mut node.in_handle {
-                        h.x += right_offset;
-                    }
-                    if let Some(h) = &mut node.out_handle {
-                        h.x += right_offset;
-                    }
-                }
-            }
-            g
+        draw_resolved(&mut frame, &cam, doc, &self.app.kern_left);
+        // Right glyph, translated by the advance plus the kern. A shifted
+        // camera avoids mutating outlines for display.
+        let right_cam = crate::app::Camera {
+            origin_x: cam.origin_x - (right_offset as f32) * cam.scale,
+            origin_y: cam.origin_y,
+            scale: cam.scale,
         };
-        draw_glyph(&mut frame, &cam, &shifted);
+        draw_resolved(&mut frame, &right_cam, doc, &self.app.kern_right);
 
         vec![frame.into_geometry()]
     }

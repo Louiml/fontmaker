@@ -1,6 +1,6 @@
 //! The document: the in-memory model of a typeface, persisted as JSON.
 
-use crate::glyph::{Form, Glyph, JoiningType};
+use crate::glyph::{Contour, Form, Glyph, JoiningType};
 use crate::variation::{Axis, Location};
 use kurbo::Rect;
 use serde::{Deserialize, Serialize};
@@ -399,6 +399,49 @@ impl Document {
         b
     }
 
+    /// The contours of a glyph with every component resolved recursively.
+    ///
+    /// Each component's outlines are scaled then offset per its transform.
+    /// Cycles (a glyph ultimately referencing itself) resolve to nothing
+    /// rather than recursing forever.
+    pub fn resolve_glyph(&self, name: &str) -> Vec<Contour> {
+        self.resolve_inner(name, &mut Vec::new())
+    }
+
+    fn resolve_inner(&self, name: &str, stack: &mut Vec<String>) -> Vec<Contour> {
+        if stack.iter().any(|n| n == name) {
+            return Vec::new(); // cycle: drop this branch
+        }
+        stack.push(name.to_string());
+        let mut out = Vec::new();
+        if let Some(glyph) = self.glyph(name) {
+            out.extend(glyph.contours.iter().cloned());
+            for component in &glyph.components {
+                let mut sub = self.resolve_inner(&component.glyph, stack);
+                for contour in &mut sub {
+                    crate::geom::transform_nodes(&mut contour.nodes, component.affine());
+                }
+                out.extend(sub);
+            }
+        }
+        stack.pop();
+        out
+    }
+
+    /// Bounds of a glyph with its components resolved.
+    pub fn resolved_bounds(&self, name: &str) -> Option<Rect> {
+        let mut b: Option<Rect> = None;
+        for contour in self.resolve_glyph(name) {
+            if let Some(cb) = contour.bounds() {
+                b = Some(match b {
+                    Some(existing) => existing.union(cb),
+                    None => cb,
+                });
+            }
+        }
+        b
+    }
+
     /// How many glyphs in the charset have been drawn. Drives the progress bar.
     pub fn completion(&self) -> (usize, usize) {
         let total = self.charset.len();
@@ -506,6 +549,101 @@ mod tests {
         assert!(doc.rename_glyph("Z", "Q").is_err(), "unknown glyph");
         // Nothing was changed by the failed attempts.
         assert!(doc.glyph("A").is_some());
+    }
+
+    #[test]
+    fn resolve_flattens_components() {
+        use crate::glyph::Component;
+        let mut doc = Document::default();
+        let mut a = Glyph::new("A");
+        a.contours.push(crate::stroke::rectangle(0.0, 0.0, 300.0, 700.0));
+        doc.add_glyph(a);
+
+        let mut marks = Glyph::new("dieresis");
+        marks.contours.push(crate::stroke::rectangle(0.0, 750.0, 100.0, 850.0));
+        doc.add_glyph(marks);
+
+        let mut adieresis = Glyph::new("Adieresis");
+        adieresis.components.push(Component::new("A", 0.0, 0.0));
+        adieresis.components.push(Component::new("dieresis", 350.0, 0.0));
+        doc.add_glyph(adieresis);
+
+        let resolved = doc.resolve_glyph("Adieresis");
+        assert_eq!(resolved.len(), 2, "A plus the dieresis");
+        // The dieresis is offset by (350, 0), widening the bounds past A.
+        let b = doc.resolved_bounds("Adieresis").unwrap();
+        assert!((b.width() - 450.0).abs() < 1e-9, "width was {}", b.width());
+        assert!((b.y1 - 850.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn resolve_applies_scale_then_offset() {
+        use crate::glyph::Component;
+        let mut doc = Document::default();
+        let mut a = Glyph::new("A");
+        a.contours.push(crate::stroke::rectangle(0.0, 0.0, 100.0, 100.0));
+        doc.add_glyph(a);
+
+        let mut scaled = Glyph::new("half");
+        scaled.components.push(Component {
+            glyph: "A".into(),
+            offset: (50.0, 200.0),
+            scale: (0.5, 0.5),
+        });
+        doc.add_glyph(scaled);
+
+        let resolved = doc.resolve_glyph("half");
+        assert_eq!(resolved.len(), 1);
+        // Point (100, 100) becomes (50, 50) scaled, then (100, 250) offset.
+        assert_eq!(resolved[0].nodes[2].pos, kurbo::Point::new(100.0, 250.0));
+    }
+
+    #[test]
+    fn resolve_survives_cycles() {
+        use crate::glyph::Component;
+        let mut doc = Document::default();
+        let mut a = Glyph::new("A");
+        a.contours.push(crate::stroke::rectangle(0.0, 0.0, 100.0, 100.0));
+        a.components.push(Component::new("B", 0.0, 0.0));
+        doc.add_glyph(a);
+        let mut b = Glyph::new("B");
+        b.components.push(Component::new("A", 0.0, 0.0));
+        doc.add_glyph(b);
+
+        // A -> B -> A: the cycle must terminate, keeping A's own contour.
+        let resolved = doc.resolve_glyph("A");
+        assert_eq!(resolved.len(), 1, "only A's own contour survives the cycle");
+    }
+
+    #[test]
+    fn glyph_with_components_counts_as_drawn() {
+        use crate::glyph::Component;
+        let mut doc = Document::default();
+        let mut adieresis = Glyph::new("Adieresis");
+        adieresis.components.push(Component::new("A", 0.0, 0.0));
+        doc.add_glyph(adieresis);
+        assert!(doc.glyph("Adieresis").unwrap().is_drawn());
+    }
+
+    #[test]
+    fn components_survive_json_roundtrip() {
+        use crate::glyph::Component;
+        let mut doc = Document::default();
+        doc.add_glyph(Glyph::new("A"));
+        let mut adieresis = Glyph::new("Adieresis");
+        adieresis.components.push(Component {
+            glyph: "A".into(),
+            offset: (10.0, 20.0),
+            scale: (0.9, 0.8),
+        });
+        doc.add_glyph(adieresis);
+
+        let json = crate::project::to_json(&doc).unwrap();
+        let back = crate::project::from_json(&json).unwrap();
+        let comps = &back.glyph("Adieresis").unwrap().components;
+        assert_eq!(comps.len(), 1);
+        assert_eq!(comps[0].offset, (10.0, 20.0));
+        assert_eq!(comps[0].scale, (0.9, 0.8));
     }
 
     #[test]

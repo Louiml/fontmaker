@@ -137,6 +137,45 @@ mod tests {
         assert_eq!(shaped[1].glyph.glyph_index, gid("B"));
     }
 
+    #[test]
+    fn composite_glyph_maps_and_shapes() {
+        use fontmaker_core::Component;
+
+        // Ä = A + dieresis, referenced as a TrueType composite. A exists in
+        // the Latin charset already, so edit it in place.
+        let mut doc = Document::default();
+        scripts::apply_script(&mut doc, Script::Latin);
+
+        let a = doc.glyph_mut("A").expect("A is in the Latin charset");
+        a.contours.push(rectangle(0.0, 0.0, 300.0, 700.0));
+        a.advance = 320.0;
+
+        let mut marks = Glyph::new("dieresis");
+        marks.contours.push(rectangle(0.0, 750.0, 100.0, 850.0));
+        marks.advance = 100.0;
+        doc.add_glyph(marks);
+
+        let mut adieresis = Glyph::new("Adieresis").with_char('\u{00C4}');
+        adieresis.components.push(Component::new("A", 0.0, 0.0));
+        adieresis
+            .components
+            .push(Component::new("dieresis", 110.0, 200.0));
+        adieresis.advance = 320.0;
+        doc.add_glyph(adieresis);
+
+        let order = doc.glyph_order.clone();
+        let bytes = build(&doc);
+        let shaped = shape(&bytes, "\u{00C4}", tag::LATN);
+
+        assert_eq!(shaped.len(), 1);
+        let gid = |name: &str| order.iter().position(|n| n == name).unwrap() as u16;
+        assert_eq!(
+            shaped[0].glyph.glyph_index,
+            gid("Adieresis"),
+            "Ä must map to the composite glyph via the cmap"
+        );
+    }
+
     /// The glyph model round-trips through shaping without the exporter being
     /// involved — a smoke test for `Glyph` construction.
     #[test]

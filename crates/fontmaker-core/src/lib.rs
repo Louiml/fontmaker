@@ -12,7 +12,7 @@ pub mod variation;
 
 pub use document::{CharsetEntry, Document, FontMeta, Script, VerticalMetrics};
 pub use geom::{contains_point, contour_to_bezpath, flatten, mirror_x, mirror_y, transform_nodes, Node};
-pub use glyph::{insert_point_on_segment, Contour, Form, Glyph, JoiningType};
+pub use glyph::{insert_point_on_segment, Component, Contour, Form, Glyph, JoiningType};
 pub use history::{Edit, History};
 pub use stroke::{
     ellipse, freehand_to_bezpath, path_to_contour, polygon, rectangle, stroke_to_path, StrokeCap,

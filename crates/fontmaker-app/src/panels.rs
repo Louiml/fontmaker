@@ -228,8 +228,9 @@ pub fn inspector(app: &App) -> Element<'_, Message> {
 
     let status = if glyph.is_drawn() { "drawn" } else { "empty" };
 
-    // Sidebearings from the actual ink, not the stored lsb field.
-    let sidebearings = match glyph.bounds() {
+    // Sidebearings from the actual ink (components resolved), not the stored
+    // lsb field.
+    let sidebearings = match app.doc.resolved_bounds(&glyph.name) {
         Some(b) => format!("LSB {:.0}   RSB {:.0}", b.x0, glyph.advance - b.x1),
         None => "LSB -   RSB -".to_string(),
     };
@@ -274,6 +275,76 @@ pub fn inspector(app: &App) -> Element<'_, Message> {
     ]
     .spacing(4);
 
+    // Components: references to other glyphs' outlines.
+    let candidates: Vec<String> = app
+        .doc
+        .glyph_order
+        .iter()
+        .filter(|n| **n != app.current && **n != ".notdef")
+        .cloned()
+        .collect();
+    let picker = pick_list(candidates.clone(), app.component_picker.clone(), Message::PickComponent)
+        .width(150)
+        .padding(3);
+    let add_row = row![
+        picker,
+        button(text("Add").size(12))
+            .on_press_maybe(
+                app.component_picker
+                    .clone()
+                    .filter(|_| !candidates.is_empty())
+                    .map(|_| Message::AddComponent)
+            )
+            .padding(Padding::from(4)),
+    ]
+    .spacing(4);
+
+    let mut comp_rows = column![].spacing(3);
+    for (i, comp) in glyph.components.iter().enumerate() {
+        comp_rows = comp_rows.push(
+            column![
+                row![
+                    text(&comp.glyph).size(12).width(Length::Fill),
+                    button(text("x").size(11))
+                        .on_press(Message::RemoveComponent(i))
+                        .padding(Padding::from(2)),
+                ]
+                .align_y(iced::alignment::Vertical::Center),
+                row![
+                    text("x").size(10),
+                    slider(-300.0..=300.0, comp.offset.0, move |v| Message::ComponentOffsetX(i, v))
+                        .width(130),
+                    text(format!("{:.0}", comp.offset.0)).size(10),
+                ]
+                .spacing(4)
+                .align_y(iced::alignment::Vertical::Center),
+                row![
+                    text("y").size(10),
+                    slider(-300.0..=300.0, comp.offset.1, move |v| Message::ComponentOffsetY(i, v))
+                        .width(130),
+                    text(format!("{:.0}", comp.offset.1)).size(10),
+                ]
+                .spacing(4)
+                .align_y(iced::alignment::Vertical::Center),
+            ]
+            .spacing(2),
+        );
+    }
+    let components_section = if glyph.components.is_empty() {
+        column![
+            text("Components").size(13),
+            add_row,
+        ]
+        .spacing(4)
+    } else {
+        column![
+            text(format!("Components ({})", glyph.components.len())).size(13),
+            add_row,
+            comp_rows,
+        ]
+        .spacing(4)
+    };
+
     let rename_row = row![
         text_input("name", &app.rename_buffer)
             .on_input(Message::RenameGlyphChanged)
@@ -305,6 +376,7 @@ pub fn inspector(app: &App) -> Element<'_, Message> {
             advance_row,
             contours,
             forms,
+            components_section,
             rename_row,
             metric_buttons,
             edit_buttons,

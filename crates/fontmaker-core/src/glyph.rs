@@ -70,6 +70,40 @@ pub enum JoiningType {
     Joining,
 }
 
+/// A reference to another glyph's outlines, placed with an offset and a
+/// non-uniform scale.
+///
+/// Composites are how accented letters are built: Ä = A + dieresis. The
+/// referenced glyph stays the single source of truth — edit A and every
+/// accented derivative follows.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Component {
+    /// Name of the referenced glyph.
+    pub glyph: String,
+    /// Placement offset in font units.
+    #[serde(default)]
+    pub offset: (f64, f64),
+    /// Scale factors; (1.0, 1.0) leaves the component untouched.
+    #[serde(default = "default_scale")]
+    pub scale: (f64, f64),
+}
+
+fn default_scale() -> (f64, f64) {
+    (1.0, 1.0)
+}
+
+impl Component {
+    pub fn new(glyph: impl Into<String>, dx: f64, dy: f64) -> Self {
+        Self { glyph: glyph.into(), offset: (dx, dy), scale: default_scale() }
+    }
+
+    /// The affine transform this component applies: scale first, then offset.
+    pub fn affine(&self) -> kurbo::Affine {
+        kurbo::Affine::translate(self.offset)
+            * kurbo::Affine::scale_non_uniform(self.scale.0, self.scale.1)
+    }
+}
+
 /// A closed or open loop of nodes. Open contours are used while the pen tool
 /// is mid-stroke; the exporter rejects them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -317,6 +351,10 @@ pub struct Glyph {
     pub lsb: f64,
     #[serde(default)]
     pub contours: Vec<Contour>,
+    /// References to other glyphs' outlines (composites). A glyph with
+    /// components and no contours exports as a TrueType composite.
+    #[serde(default)]
+    pub components: Vec<Component>,
     /// Named attachment points used by the Arabic/Hebrew form generator and
     /// by mark positioning. Keyed by name, e.g. `entry`, `exit`, `top`.
     #[serde(default)]
@@ -341,6 +379,7 @@ impl Default for Glyph {
             advance: 500.0,
             lsb: 0.0,
             contours: Vec::new(),
+            components: Vec::new(),
             anchors: Default::default(),
             form: Form::Isol,
             note: String::new(),
@@ -367,7 +406,7 @@ impl Glyph {
     }
 
     pub fn is_drawn(&self) -> bool {
-        self.contours.iter().any(|c| !c.is_empty())
+        self.contours.iter().any(|c| !c.is_empty()) || !self.components.is_empty()
     }
 
     pub fn bounds(&self) -> Option<kurbo::Rect> {

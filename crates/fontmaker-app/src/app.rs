@@ -102,7 +102,7 @@ impl Camera {
     /// Fit the current glyph's ink (or the guides when it is empty) into the view.
     pub fn fit(&mut self, doc: &Document, glyph_name: &str, width: f32, height: f32) {
         let glyph = doc.glyph(glyph_name);
-        let (x0, y0, x1, y1) = match glyph.and_then(|g| g.bounds()) {
+        let (x0, y0, x1, y1) = match doc.resolved_bounds(glyph_name) {
             Some(b) => (
                 b.x0 - 100.0,
                 (b.y0 - 100.0).min(doc.metrics.descender),
@@ -173,6 +173,11 @@ pub enum Message {
     ClearReference,
     RenameGlyphChanged(String),
     RenameGlyphSubmit,
+    PickComponent(String),
+    AddComponent,
+    RemoveComponent(usize),
+    ComponentOffsetX(usize, f64),
+    ComponentOffsetY(usize, f64),
     FitView,
     Canvas(CanvasMsg),
 }
@@ -251,6 +256,8 @@ pub struct App {
     pub reference: Option<ReferenceImage>,
     /// Buffer for the rename text input in the inspector.
     pub rename_buffer: String,
+    /// Glyph picked in the "add component" picker.
+    pub component_picker: Option<String>,
 }
 
 /// A reference image loaded from disk.
@@ -307,6 +314,7 @@ impl App {
             kern_selected: None,
             reference: None,
             rename_buffer: current,
+            component_picker: None,
         }
     }
 
@@ -320,6 +328,7 @@ impl App {
                     self.fit_pending = true;
                     self.refit();
                     self.rename_buffer = self.current.clone();
+                    self.component_picker = None;
                     self.status = format!("Editing {}", self.current);
                 }
                 Task::none()
@@ -556,7 +565,7 @@ impl App {
                 Task::none()
             }
             Message::AutoAdvance => {
-                let Some(bounds) = self.doc.glyph(&self.current).and_then(|g| g.bounds()) else {
+                let Some(bounds) = self.doc.resolved_bounds(&self.current) else {
                     self.status = "Nothing drawn to measure.".to_string();
                     return Task::none();
                 };
@@ -686,6 +695,60 @@ impl App {
                         self.status = format!("Renamed to '{new}'.");
                     }
                     Err(e) => self.status = format!("Rename failed: {e}"),
+                }
+                Task::none()
+            }
+            Message::PickComponent(name) => {
+                self.component_picker = Some(name);
+                Task::none()
+            }
+            Message::AddComponent => {
+                let Some(picked) = self.component_picker.clone() else {
+                    self.status = "Pick a glyph to add as a component first.".to_string();
+                    return Task::none();
+                };
+                if picked == self.current {
+                    self.status = "A glyph cannot reference itself.".to_string();
+                    return Task::none();
+                }
+                self.history.begin(&self.doc);
+                self.history.touch(&self.doc, &self.current);
+                if let Some(g) = self.doc.glyph_mut(&self.current) {
+                    g.components.push(fontmaker_core::Component::new(picked.clone(), 0.0, 0.0));
+                }
+                self.history.commit(&self.doc);
+                self.status = format!("Added component '{picked}'. Set its offsets below.");
+                Task::none()
+            }
+            Message::RemoveComponent(index) => {
+                self.history.begin(&self.doc);
+                self.history.touch(&self.doc, &self.current);
+                if let Some(g) = self.doc.glyph_mut(&self.current) {
+                    if index < g.components.len() {
+                        let removed = g.components.remove(index);
+                        self.status = format!("Removed component '{}'.", removed.glyph);
+                    }
+                }
+                self.history.commit(&self.doc);
+                Task::none()
+            }
+            Message::ComponentOffsetX(index, value) => {
+                if let Some(comp) = self
+                    .doc
+                    .glyph_mut(&self.current)
+                    .and_then(|g| g.components.get_mut(index))
+                {
+                    comp.offset.0 = value.clamp(-2000.0, 2000.0);
+                }
+                Task::none()
+            }
+            Message::ComponentOffsetY(index, value) => {
+                if let Some(comp) = self
+                    .doc
+                    .glyph_mut(&self.current)
+                    .and_then(|g| g.components.get_mut(index))
+                {
+                    comp.offset.1 = value.clamp(-2000.0, 2000.0);
                 }
                 Task::none()
             }

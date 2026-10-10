@@ -9,12 +9,17 @@ use std::collections::BTreeMap;
 use fontmaker_core::document::{Document, Script};
 use fontmaker_core::geom::simplify_path;
 use fontmaker_core::glyph::Glyph;
-use font_types::{Fixed, FWord, GlyphId, LongDateTime, NameId, Tag, UfWord, Version16Dot16};
+use font_types::{
+    F2Dot14, Fixed, FWord, GlyphId, GlyphId16, LongDateTime, NameId, Tag, UfWord, Version16Dot16,
+};
 use kurbo::{BezPath, PathEl, Point, Shape};
 use write_fonts::{
     tables::{
         cmap::Cmap,
-        glyf::{Bbox, Glyph as TtGlyph, GlyfLocaBuilder, SimpleGlyph},
+        glyf::{
+            Anchor, Bbox, CompositeGlyph, Component as TtComponent, Glyph as TtGlyph, GlyfLocaBuilder,
+            SimpleGlyph, Transform as ComponentTransform,
+        },
         head::{Flags, Head, MacStyle},
         hhea::Hhea,
         hmtx::{Hmtx, LongMetric},
@@ -188,13 +193,83 @@ fn compile_glyphs(doc: &Document, order: &[String]) -> Result<Vec<CompiledGlyph>
         let Some(glyph) = doc.glyph(name) else {
             continue;
         };
-        out.push(compile_glyph(glyph, doc.metrics.upem)?);
+        out.push(compile_glyph(glyph, doc)?);
     }
     Ok(out)
 }
 
-fn compile_glyph(glyph: &Glyph, upem: f64) -> Result<CompiledGlyph> {
-    let ttf = if glyph.contours.iter().all(|c| c.is_empty()) {
+/// Build a TrueType composite glyph from the document's component references.
+fn build_composite(glyph: &Glyph, doc: &Document) -> Result<TtGlyph> {
+    let mut items: Vec<(TtComponent, Bbox)> = Vec::new();
+    for component in &glyph.components {
+        let Some(gid) = doc
+            .glyph_order
+            .iter()
+            .position(|n| n == &component.glyph)
+            .map(|i| i as u16)
+        else {
+            return Err(ExportError::MalformedGlyph {
+                glyph: glyph.name.clone(),
+                reason: format!("component '{}' is not in the glyph set", component.glyph),
+            });
+        };
+
+        // Bbox of the component's outlines after its transform.
+        let mut bbox = kurbo::Rect::ZERO;
+        let mut first = true;
+        for mut contour in doc.resolve_glyph(&component.glyph) {
+            fontmaker_core::transform_nodes(&mut contour.nodes, component.affine());
+            if let Some(b) = contour.bounds() {
+                bbox = if first { b } else { bbox.union(b) };
+                first = false;
+            }
+        }
+        if first {
+            return Err(ExportError::MalformedGlyph {
+                glyph: glyph.name.clone(),
+                reason: format!(
+                    "component '{}' has no outlines",
+                    component.glyph
+                ),
+            });
+        }
+
+        let mut transform = ComponentTransform::default();
+        if (component.scale.0 - 1.0).abs() > 1e-9 {
+            transform.xx = F2Dot14::from_f32(component.scale.0.clamp(-1.999, 1.999) as f32);
+        }
+        if (component.scale.1 - 1.0).abs() > 1e-9 {
+            transform.yy = F2Dot14::from_f32(component.scale.1.clamp(-1.999, 1.999) as f32);
+        }
+        let anchor = Anchor::Offset {
+            x: component.offset.0.round().clamp(-32768.0, 32767.0) as i16,
+            y: component.offset.1.round().clamp(-32768.0, 32767.0) as i16,
+        };
+
+        items.push((
+            TtComponent::new(
+                GlyphId16::new(gid),
+                anchor,
+                transform,
+                write_fonts::tables::glyf::ComponentFlags::default(),
+            ),
+            bbox.into(),
+        ));
+    }
+
+    let composite = CompositeGlyph::try_from_iter(items).map_err(|e| ExportError::MalformedGlyph {
+        glyph: glyph.name.clone(),
+        reason: e.to_string(),
+    })?;
+    Ok(TtGlyph::Composite(composite))
+}
+
+fn compile_glyph(glyph: &Glyph, doc: &Document) -> Result<CompiledGlyph> {
+    let upem = doc.metrics.upem;
+    let ttf = if !glyph.components.is_empty() && glyph.contours.iter().all(|c| c.is_empty()) {
+        // A pure composite: references to other glyphs with offsets and scales.
+        build_composite(glyph, doc)?
+    } else if glyph.contours.iter().all(|c| c.is_empty()) {
         if glyph.name == ".notdef" {
             // A blank .notdef is technically valid but unreadable: any program
             // asking for a missing character should be able to see a box.
@@ -254,11 +329,16 @@ fn build_glyf(compiled: &[CompiledGlyph]) -> Result<(write_fonts::tables::glyf::
 fn build_head(doc: &Document, compiled: &[CompiledGlyph], loca_format: i16) -> Head {
     let (mut x_min, mut y_min, mut x_max, mut y_max) = (i16::MAX, i16::MAX, i16::MIN, i16::MIN);
     for g in compiled {
-        if let TtGlyph::Simple(s) = &g.ttf {
-            x_min = x_min.min(s.bbox.x_min);
-            y_min = y_min.min(s.bbox.y_min);
-            x_max = x_max.max(s.bbox.x_max);
-            y_max = y_max.max(s.bbox.y_max);
+        let bbox = match &g.ttf {
+            TtGlyph::Simple(s) => Some(s.bbox),
+            TtGlyph::Composite(c) => Some(c.bbox),
+            TtGlyph::Empty => None,
+        };
+        if let Some(b) = bbox {
+            x_min = x_min.min(b.x_min);
+            y_min = y_min.min(b.y_min);
+            x_max = x_max.max(b.x_max);
+            y_max = y_max.max(b.y_max);
         }
     }
     if x_min > x_max {
@@ -308,9 +388,14 @@ fn build_hhea(doc: &Document, compiled: &[CompiledGlyph]) -> Hhea {
     for g in compiled {
         max_advance = max_advance.max(g.advance);
         min_lsb = min_lsb.min(g.lsb);
-        if let TtGlyph::Simple(s) = &g.ttf {
-            min_rsb = min_rsb.min(s.bbox.x_min - g.lsb);
-            x_max_extent = x_max_extent.max(s.bbox.x_max);
+        let bbox = match &g.ttf {
+            TtGlyph::Simple(s) => Some(s.bbox),
+            TtGlyph::Composite(c) => Some(c.bbox),
+            TtGlyph::Empty => None,
+        };
+        if let Some(b) = bbox {
+            min_rsb = min_rsb.min(b.x_min - g.lsb);
+            x_max_extent = x_max_extent.max(b.x_max);
         }
     }
     if min_lsb > min_rsb {
