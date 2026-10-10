@@ -125,6 +125,23 @@ pub fn build_ttf(doc: &Document) -> Result<Vec<u8>> {
     builder.add_table(&glyf).expect("glyf");
     builder.add_table(&loca).expect("loca");
 
+    // Layout tables, when there is anything for them to say. GSUB carries the
+    // Arabic positional forms, GPOS the kerning pairs.
+    let gid_of = |name: &str| compiled.iter().position(|g| g.name == name).map(|i| i as u16);
+    let drawn = |name: &str| {
+        compiled
+            .iter()
+            .find(|g| g.name == name)
+            .map(|g| !matches!(g.ttf, TtGlyph::Empty))
+            .unwrap_or(false)
+    };
+    if let Some(gsub) = crate::layout::build_gsub(doc, &drawn, &gid_of) {
+        builder.add_table(&gsub).expect("GSUB");
+    }
+    if let Some(gpos) = crate::layout::build_gpos_kern(doc, &gid_of) {
+        builder.add_table(&gpos).expect("GPOS");
+    }
+
     Ok(builder.build())
 }
 

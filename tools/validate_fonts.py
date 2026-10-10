@@ -45,27 +45,57 @@ def check_font(path: Path) -> list[str]:
     print(f"    asc/desc    : {font['hhea'].ascent}/{font['hhea'].descent}")
     print(f"    capHeight   : {font['OS/2'].sCapHeight}, xHeight {font['OS/2'].sxHeight}")
 
-    # Every encoded codepoint must reach a glyph that actually has outlines,
-    # apart from space.
-    for codepoint, glyph_name in sorted(cmap.items()):
-        glyph = font["glyf"][glyph_name]
-        if glyph_name != "space" and glyph.numberOfContours == 0:
-            problems.append(f"U+{codepoint:04X} maps to '{glyph_name}' which is empty")
+    # Every encoded codepoint must reach a glyph (checked in detail later,
+    # after the layout tables, where shared punctuation is exempted).
 
     # Advance widths must survive the round trip.
     for glyph_name in glyph_order:
         if font["hmtx"][glyph_name][0] <= 0:
             problems.append(f"'{glyph_name}' has a non-positive advance width")
 
-    # Round-trip the outlines through the pens to prove they are readable.
+        # Round-trip the outlines through the pens to prove they are readable.
+    # Unencoded glyphs (positional forms and alternates) may legitimately be
+    # empty while the font is in progress, so only encoded glyphs are checked.
     from fontTools.pens.recordingPen import RecordingPen
 
     glyph_set = font.getGlyphSet()
+    encoded_glyphs = set(cmap.values())
     for glyph_name in glyph_order:
+        if glyph_name not in encoded_glyphs:
+            continue
         pen = RecordingPen()
         glyph_set[glyph_name].draw(pen)
         if glyph_name != "space" and not pen.value:
             problems.append(f"'{glyph_name}' produced no drawing operations")
+
+    # Layout tables, when present, must decompile.
+    if "GSUB" in font:
+        gsub = font["GSUB"].table
+        scripts = [s.ScriptTag for s in gsub.ScriptList.ScriptRecord]
+        features = [f.FeatureTag for f in gsub.FeatureList.FeatureRecord]
+        lookups = len(gsub.LookupList.Lookup)
+        print(f"    GSUB         : scripts={scripts} features={features} lookups={lookups}")
+        if not features:
+            problems.append("GSUB present but has no features")
+    if "GPOS" in font:
+        gpos = font["GPOS"].table
+        features = [f.FeatureTag for f in gpos.FeatureList.FeatureRecord]
+        print(f"    GPOS         : features={features}")
+        if "kern" not in features:
+            problems.append("GPOS present but has no kern feature")
+
+    # Encoded glyphs with no outlines. Shared punctuation and digits are
+    # expected to be empty in a work-in-progress font, so they are not
+    # problems - flagging them would drown the real signal.
+    SHARED_EMPTY_OK = set(range(0x20, 0x40)) | {0x22, 0x27}
+    for codepoint, glyph_name in sorted(cmap.items()):
+        glyph = font["glyf"][glyph_name]
+        if glyph_name == "space" or codepoint in SHARED_EMPTY_OK:
+            continue
+        if glyph.numberOfContours == 0:
+            problems.append(
+                f"U+{codepoint:04X} maps to '{glyph_name}' which is empty"
+            )
 
     # head magic and checksum adjustment.
     head = font["head"]

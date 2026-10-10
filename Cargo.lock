@@ -1245,6 +1245,7 @@ dependencies = [
  "allsorts",
  "fontmaker-core",
  "fontmaker-export",
+ "fontmaker-script",
  "kurbo 0.13.1",
  "skrifa 0.48.0",
 ]

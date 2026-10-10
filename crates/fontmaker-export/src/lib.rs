@@ -5,6 +5,7 @@
 //! they can be tested headlessly and reused by the live-preview builder.
 
 pub mod error;
+pub mod layout;
 pub mod ttf;
 pub mod woff;
 pub mod woff2;

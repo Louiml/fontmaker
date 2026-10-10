@@ -9,6 +9,7 @@ description = "Shaping bridge for FontMaker preview: build in memory, shape, ret
 
 [dependencies]
 fontmaker-core.workspace = true
+fontmaker-script.workspace = true
 fontmaker-export.workspace = true
 allsorts.workspace = true
 skrifa.workspace = true
