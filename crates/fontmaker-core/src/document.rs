@@ -442,6 +442,81 @@ impl Document {
         b
     }
 
+    /// The glyph's contours interpolated to `location` in design space.
+    ///
+    /// Starts from the default outline and adds the weighted deltas of every
+    /// captured variation. The scalar of a variation is the product over its
+    /// axes of how far `location` sits towards the variation's captured value
+    /// (0..1, same side of the default only) — the standard gvar scalar model
+    /// restricted to our peak-at-extreme tents.
+    pub fn interpolated_contours(&self, name: &str, location: &Location) -> Vec<Contour> {
+        let Some(glyph) = self.glyph(name) else { return Vec::new() };
+        // Start from the component-resolved default so composites interpolate
+        // against their full ink.
+        let mut out = self.resolve_glyph(name);
+
+        for variation in &glyph.variations {
+            let scalar = self.variation_scalar(&variation.location, location);
+            if scalar <= 1e-9 {
+                continue;
+            }
+            // Only apply when the point structure matches the default outline.
+            if !same_point_structure(&out, &variation.contours) {
+                continue;
+            }
+            for (default_contour, var_contour) in out.iter_mut().zip(variation.contours.iter()) {
+                for (node, var_node) in default_contour
+                    .nodes
+                    .iter_mut()
+                    .zip(var_contour.nodes.iter())
+                {
+                    node.pos.x += scalar * (var_node.pos.x - node.pos.x);
+                    node.pos.y += scalar * (var_node.pos.y - node.pos.y);
+                    if let (Some(h), Some(vh)) = (&mut node.in_handle, &var_node.in_handle) {
+                        h.x += scalar * (vh.x - h.x);
+                        h.y += scalar * (vh.y - h.y);
+                    }
+                    if let (Some(h), Some(vh)) = (&mut node.out_handle, &var_node.out_handle) {
+                        h.x += scalar * (vh.x - h.x);
+                        h.y += scalar * (vh.y - h.y);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// How strongly a variation captured at `captured` influences `location`.
+    ///
+    /// Per axis: 0 when `location` is on the other side of the default (or at
+    /// it), otherwise the linear progress from the default towards the
+    /// captured value, clamped to 0..1. Scalars multiply across axes.
+    fn variation_scalar(&self, captured: &BTreeMap<String, f64>, location: &Location) -> f64 {
+        let mut scalar = 1.0;
+        for (tag, captured_value) in captured {
+            let Some(axis) = self.axes.iter().find(|a| &a.tag == tag) else {
+                return 0.0; // axis no longer exists: variation is inert
+            };
+            let Some(location_value) = location.get(tag) else {
+                return 0.0;
+            };
+            if (captured_value - axis.default).abs() < 1e-9 {
+                continue; // captured at the default: always full weight
+            }
+            let same_side =
+                (location_value - axis.default) * (captured_value - axis.default) > 0.0;
+            if !same_side {
+                return 0.0;
+            }
+            let progress = (location_value - axis.default) / (captured_value - axis.default);
+            scalar *= progress.clamp(0.0, 1.0);
+            if scalar <= 1e-9 {
+                return 0.0;
+            }
+        }
+        scalar
+    }
+
     /// How many glyphs in the charset have been drawn. Drives the progress bar.
     pub fn completion(&self) -> (usize, usize) {
         let total = self.charset.len();
@@ -454,6 +529,11 @@ impl Document {
     }
 }
 
+/// Whether two contour lists carry the same number of points per contour, so
+/// point-wise deltas between them are well-defined.
+fn same_point_structure(a: &[Contour], b: &[Contour]) -> bool {
+    a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.nodes.len() == y.nodes.len())
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -657,5 +737,110 @@ mod tests {
         let json = serde_json::to_string_pretty(&doc).unwrap();
         let back: Document = serde_json::from_str(&json).unwrap();
         assert_eq!(doc, back);
+    }
+}
+
+#[cfg(test)]
+mod variation_tests {
+    use super::*;
+    use crate::glyph::GlyphVariation;
+    use crate::stroke::rectangle;
+
+    fn doc_with_axis() -> Document {
+        let mut doc = Document::default();
+        let mut a = Glyph::new("A");
+        a.contours.push(rectangle(0.0, 0.0, 300.0, 700.0));
+        doc.add_glyph(a);
+        doc.axes.push(crate::Axis::new("wght", "Weight", 100.0, 400.0, 900.0));
+        doc
+    }
+
+    fn capture_at(doc: &mut Document, value: f64, dx: f64) {
+        // Capture A's current outline shifted by (dx, 0) as a variation.
+        let mut contours = doc.glyph("A").unwrap().contours.clone();
+        for c in &mut contours {
+            for n in &mut c.nodes {
+                n.pos.x += dx;
+            }
+        }
+        let mut location = BTreeMap::new();
+        location.insert("wght".to_string(), value);
+        let glyph = doc.glyph_mut("A").unwrap();
+        glyph.variations.push(GlyphVariation { location, contours });
+    }
+
+    #[test]
+    fn interpolation_at_captured_location_matches_capture() {
+        let mut doc = doc_with_axis();
+        capture_at(&mut doc, 900.0, 50.0);
+
+        let mut location = Location::default();
+        location.set("wght", 900.0);
+        let out = doc.interpolated_contours("A", &location);
+        // Fully at the captured location: x shifted by exactly 50.
+        assert_eq!(out[0].nodes[0].pos.x, 50.0);
+        assert_eq!(out[0].nodes[0].pos.y, 0.0);
+    }
+
+    #[test]
+    fn interpolation_at_default_is_the_default() {
+        let mut doc = doc_with_axis();
+        capture_at(&mut doc, 900.0, 50.0);
+
+        let location = Location::defaults(&doc.axes);
+        let out = doc.interpolated_contours("A", &location);
+        assert_eq!(out[0].nodes[0].pos.x, 0.0, "no delta at the default");
+    }
+
+    #[test]
+    fn interpolation_scales_linearly() {
+        let mut doc = doc_with_axis();
+        capture_at(&mut doc, 900.0, 50.0);
+
+        let mut location = Location::default();
+        location.set("wght", 650.0); // halfway between 400 and 900
+        let out = doc.interpolated_contours("A", &location);
+        assert!((out[0].nodes[0].pos.x - 25.0).abs() < 1e-9, "halfway: got {}", out[0].nodes[0].pos.x);
+    }
+
+    #[test]
+    fn interpolation_ignores_wrong_side_of_default() {
+        let mut doc = doc_with_axis();
+        capture_at(&mut doc, 900.0, 50.0);
+
+        let mut location = Location::default();
+        location.set("wght", 100.0); // below the default, opposite side
+        let out = doc.interpolated_contours("A", &location);
+        assert_eq!(out[0].nodes[0].pos.x, 0.0);
+    }
+
+    #[test]
+    fn variation_survives_json_roundtrip() {
+        let mut doc = doc_with_axis();
+        capture_at(&mut doc, 900.0, 50.0);
+        let json = crate::project::to_json(&doc).unwrap();
+        let back = crate::project::from_json(&json).unwrap();
+        assert_eq!(back.glyph("A").unwrap().variations.len(), 1);
+    }
+
+    #[test]
+    fn variations_with_mismatched_points_are_skipped() {
+        // A captured variation whose point structure no longer matches the
+        // default outline must be ignored, never corrupt the outline.
+        let mut doc = doc_with_axis();
+        capture_at(&mut doc, 900.0, 50.0);
+        // Now add a second node to the default outline: structure diverged.
+        if let Some(g) = doc.glyph_mut("A") {
+            g.contours[0]
+                .nodes
+                .push(crate::geom::Node::corner(kurbo::Point::new(150.0, 350.0)));
+        }
+
+        let mut location = Location::default();
+        location.set("wght", 900.0);
+        let out = doc.interpolated_contours("A", &location);
+        // No deltas applied, but the extra node is there.
+        assert_eq!(out[0].nodes.len(), 5);
+        assert_eq!(out[0].nodes[0].pos.x, 0.0);
     }
 }

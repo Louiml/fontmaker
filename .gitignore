@@ -13,6 +13,7 @@
 /dist
 /artifacts
 /examples-out
+*.fontmaker.json
 *.ttf
 !crates/fontmaker-export/tests/fixtures/**/*.ttf
 *.otf

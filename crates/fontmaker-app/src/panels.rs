@@ -363,6 +363,9 @@ pub fn inspector(app: &App) -> Element<'_, Message> {
             .padding(Padding::from(5)),
         button(text("Flip H").size(12)).on_press(Message::FlipH).padding(Padding::from(5)),
         button(text("Flip V").size(12)).on_press(Message::FlipV).padding(Padding::from(5)),
+        button(text("Unify").size(12))
+            .on_press(Message::UnifyGlyph)
+            .padding(Padding::from(5)),
     ]
     .spacing(4);
 

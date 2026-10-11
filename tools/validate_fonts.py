@@ -35,7 +35,8 @@ def check_font(path: Path) -> list[str]:
     cmap = font.getBestCmap()
     name = font["name"]
 
-    print(f"\n=== {path.name}  ({FLAVORS.get(magic, f"unknown {magic!r}")})")
+    flavor = FLAVORS.get(magic, f"unknown {magic!r}")
+    print(f"\n=== {path.name}  ({flavor})")
     print(f"    tables      : {', '.join(sorted(font.keys()))}")
     print(f"    glyphs      : {len(glyph_order)} -> {glyph_order}")
     print(f"    encoded     : {sorted(hex(c) for c in cmap)}")

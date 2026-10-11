@@ -1,13 +1,16 @@
-//! OpenType layout writers: GSUB for Arabic positional forms, GPOS for kerning.
+﻿//! OpenType layout writers: GSUB for Arabic positional forms, GPOS for kerning.
 //!
-//! Both tables share the same skeleton — a ScriptList naming the document's
+//! Both tables share the same skeleton: a ScriptList naming the document's
 //! script, a FeatureList naming the features, and a LookupList doing the work.
 //! The substitution mappings use `SingleSubstFormat2` (explicit pairs) because
 //! our glyph order gives no guarantee that base and form glyphs are adjacent.
 //! Kerning uses `PairPosFormat1` with one `PairSet` per left glyph.
 
 use fontmaker_core::document::Document;
-use font_types::{GlyphId16, Tag};
+use font_types::{
+    F2Dot14, Fixed, GlyphId, GlyphId16, NameId, Tag,
+};
+use write_fonts::tables::fvar::{AxisInstanceArrays, Fvar, VariationAxisRecord};
 use write_fonts::tables::gsub::{
     Gsub, SingleSubst, SingleSubstFormat2, SubstitutionLookup, SubstitutionLookupList,
 };
@@ -15,6 +18,7 @@ use write_fonts::tables::gpos::{
     Gpos, PairPos, PairPosFormat1, PairSet, PairValueRecord, PositionLookup, PositionLookupList,
     ValueRecord,
 };
+use write_fonts::tables::gvar::{Gvar, GlyphDelta, GlyphDeltas, GlyphVariations};
 use write_fonts::tables::layout::{
     CoverageTable, Feature, FeatureList, FeatureRecord, LangSys, Lookup, LookupFlag, Script,
     ScriptList, ScriptRecord,
@@ -198,7 +202,7 @@ mod tests {
     #[test]
     fn gsub_appears_for_arabic_with_drawn_forms() {
         let mut doc = arabic_document();
-        // Draw the medial form of ب: the medi feature then has work to do.
+        // Draw the medial form of ׳³ֲ³ײ²ֲ´׳²ֲ²ײ²ֲ¨: the medi feature then has work to do.
         if let Some(g) = doc.glyph_mut("uni0628.medi") {
             g.contours
                 .push(fontmaker_core::stroke::rectangle(0.0, 0.0, 100.0, 100.0));
@@ -293,3 +297,136 @@ mod tests {
         assert_eq!(duals + rights, 36);
     }
 }
+
+/// Build the `fvar` table from the document's axes.
+///
+/// Returns `None` when no axes are defined (a static font). Instances are not
+/// written: the app's named-style story is not built yet.
+pub fn build_fvar(doc: &Document) -> Option<Fvar> {
+    if doc.axes.is_empty() {
+        return None;
+    }
+    let axes = doc
+        .axes
+        .iter()
+        .map(|axis| VariationAxisRecord {
+            axis_tag: {
+                let mut t = [0u8; 4];
+                t.copy_from_slice(axis.tag.as_bytes());
+                Tag::new(&t)
+            },
+            min_value: Fixed::from_f64(axis.min),
+            default_value: Fixed::from_f64(axis.default),
+            max_value: Fixed::from_f64(axis.max),
+            flags: 0,
+            axis_name_id: NameId::new(256),
+        })
+        .collect();
+    Some(Fvar::new(AxisInstanceArrays::new(axes, Vec::new())))
+}
+
+/// Normalised gvar coordinate for `value` relative to `peak` on one axis.
+///
+/// The gvar model normalises each axis to -1..0..1 around the default. Our
+/// variations are captured at axis extremes, so a captured peak at `max`
+/// normalises to +1 and at `min` to -1.
+fn normalised(value: f64, axis: &fontmaker_core::Axis) -> F2Dot14 {
+    let n = if value >= axis.default {
+        if axis.max > axis.default {
+            (value - axis.default) / (axis.max - axis.default)
+        } else {
+            0.0
+        }
+    } else if axis.min < axis.default {
+        (value - axis.default) / (axis.default - axis.min)
+    } else {
+        0.0
+    };
+    F2Dot14::from_f32(n.clamp(-1.0, 1.0) as f32)
+}
+
+
+/// Build the `gvar` table from pre-diffed variation points.
+///
+/// Deltas must be computed against the *compiled* quadratic outline (what
+/// changes point counts, so model-space deltas would misalign. `points`
+/// changes point counts, so model-space deltas would misalign. `points`
+/// carries, per glyph, the default outline's compiled points and each
+/// variation's compiled points; this function just diffs and encodes them.
+pub struct GlyphVariationPoints {
+    pub name: String,
+    /// Compiled default outline points, in `glyf` order, as (x, y) font units.
+    pub default_points: Vec<[f64; 2]>,
+    /// (axis location, compiled points at that location).
+    pub variations: Vec<(std::collections::BTreeMap<String, f64>, Vec<[f64; 2]>)>,
+}
+
+/// Build the `gvar` table.
+pub fn build_gvar(doc: &Document, points: &[GlyphVariationPoints]) -> Option<Gvar> {
+    if doc.axes.is_empty() || points.is_empty() {
+        return None;
+    }
+    let axis_count = doc.axes.len() as u16;
+
+    let mut variations: Vec<GlyphVariations> = Vec::new();
+    for (gid, glyph) in doc.ordered_glyphs().enumerate() {
+        let Some(entry) = points.iter().find(|p| p.name == glyph.name) else {
+            variations.push(GlyphVariations::new(GlyphId::new(gid as u32), Vec::new()));
+            continue;
+        };
+
+        let mut glyph_variations: Vec<GlyphDeltas> = Vec::new();
+        for (location, captured_points) in &entry.variations {
+            if captured_points.len() != entry.default_points.len()
+                || entry.default_points.is_empty()
+            {
+                continue;
+            }
+            // One tent per axis in fvar order; axes absent from the captured
+            // location peak at zero (no effect). Skip when nothing varies.
+            let peaks: Vec<F2Dot14> = doc
+                .axes
+                .iter()
+                .map(|axis| {
+                    location
+                        .get(&axis.tag)
+                        .map(|v| normalised(*v, axis))
+                        .unwrap_or_else(|| F2Dot14::from_f32(0.0))
+                })
+                .collect();
+            if peaks.iter().all(|p| p.to_f32() == 0.0) {
+                continue;
+            }
+            let tents: Vec<write_fonts::tables::variations::Tent> = peaks
+                .into_iter()
+                .map(|peak| write_fonts::tables::variations::Tent::new(peak, None))
+                .collect();
+
+            let mut deltas: Vec<GlyphDelta> = entry
+                .default_points
+                .iter()
+                .zip(captured_points.iter())
+                .map(|(d, v)| {
+                    let dx = (v[0] - d[0]).round().clamp(-32768.0, 32767.0);
+                    let dy = (v[1] - d[1]).round().clamp(-32768.0, 32767.0);
+                    GlyphDelta::new(dx as i16, dy as i16, true)
+                })
+                .collect();
+            // gvar applies deltas to the outline points followed by four
+            // phantom points, and a dense tuple must carry an entry for every
+            // one of them or readers overrun the packed data. Metrics are not
+            // varied, so the phantom deltas are zero.
+            for _ in 0..4 {
+                deltas.push(GlyphDelta::new(0, 0, true));
+            }
+            if deltas.iter().all(|d| d.x == 0 && d.y == 0) {
+                continue;
+            }
+            glyph_variations.push(GlyphDeltas::new(tents, deltas));
+        }
+        variations.push(GlyphVariations::new(GlyphId::new(gid as u32), glyph_variations));
+    }
+
+    Gvar::new(variations, axis_count).ok()
+}
+

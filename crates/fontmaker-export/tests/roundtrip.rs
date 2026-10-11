@@ -243,6 +243,101 @@ fn composite_glyphs_export_and_read_back() {
 }
 
 #[test]
+fn variable_font_exports_fvar_and_gvar() {
+    use fontmaker_core::{Axis, GlyphVariation};
+    use std::collections::BTreeMap;
+
+    let mut doc = sample();
+    doc.axes.push(Axis::new("wght", "Weight", 100.0, 400.0, 900.0));
+
+    // Capture A's outline shifted right by 100 units at wght=900.
+    let mut contours = doc.glyph("A").unwrap().contours.clone();
+    for c in &mut contours {
+        for n in &mut c.nodes {
+            n.pos.x += 100.0;
+        }
+    }
+    let mut location = BTreeMap::new();
+    location.insert("wght".to_string(), 900.0);
+    doc.glyph_mut("A")
+        .unwrap()
+        .variations
+        .push(GlyphVariation { location, contours });
+
+    let bytes = export(&doc, ExportFormat::Ttf).unwrap();
+    let font = font_ref(&bytes);
+
+    // fvar parses with one axis.
+    let fvar = font.fvar().expect("fvar present");
+    assert_eq!(fvar.axis_count(), 1);
+    let axes = fvar.axes().expect("axis records");
+    assert_eq!(axes[0].axis_tag(), font_types::Tag::new(b"wght"));
+    assert_eq!(axes[0].min_value().to_f64(), 100.0);
+    assert_eq!(axes[0].default_value().to_f64(), 400.0);
+    assert_eq!(axes[0].max_value().to_f64(), 900.0);
+    assert!(font.gvar().is_ok(), "gvar present");
+    std::fs::write(std::env::temp_dir().join("fontmaker_variable_sample.ttf"), &bytes).unwrap();
+
+    // The strongest check: skrifa draws the glyph at wght=900 and the outline
+    // moves right by the captured 100 units.
+    use skrifa::outline::{DrawSettings, OutlinePen};
+    use skrifa::{FontRef, MetadataProvider};
+
+    #[derive(Default)]
+    struct PointCollector {
+        first: Option<(f32, f32)>,
+        count: usize,
+    }
+    impl OutlinePen for PointCollector {
+        fn move_to(&mut self, x: f32, y: f32) {
+            if self.first.is_none() {
+                self.first = Some((x, y));
+            }
+            self.count += 1;
+        }
+        fn line_to(&mut self, _x: f32, _y: f32) {
+            self.count += 1;
+        }
+        fn quad_to(&mut self, _cx: f32, _cy: f32, _x: f32, _y: f32) {
+            self.count += 1;
+        }
+        fn curve_to(&mut self, _c1x: f32, _c1y: f32, _c2x: f32, _c2y: f32, _x: f32, _y: f32) {
+            self.count += 1;
+        }
+        fn close(&mut self) {}
+    }
+
+    let font_ref = FontRef::new(&bytes).expect("skrifa parses");
+    let skrifa_axes = font_ref.axes();
+    let at_max = skrifa_axes.location([(font_types::Tag::new(b"wght"), 900.0f32)]);
+    let at_default = skrifa_axes.location::<[(font_types::Tag, f32); 0]>([]);
+    let var_glyphs = font_ref.outline_glyphs();
+    let glyph = var_glyphs.get(skrifa::GlyphId::new(2)).expect("A has outlines");
+
+    let mut at900 = PointCollector::default();
+    glyph
+        .draw(
+            DrawSettings::unhinted(skrifa::instance::Size::unscaled(), &at_max),
+            &mut at900,
+        )
+        .expect("draws at 900");
+    let mut at400 = PointCollector::default();
+    glyph
+        .draw(
+            DrawSettings::unhinted(skrifa::instance::Size::unscaled(), &at_default),
+            &mut at400,
+        )
+        .expect("draws at default");
+
+    let (x900, _) = at900.first.expect("outline has points");
+    let (x400, _) = at400.first.expect("outline has points");
+    assert!(
+        (x900 - x400 - 100.0).abs() < 2.0,
+        "instantiated at 900 the outline must move right by ~100: {x900} vs {x400}"
+    );
+}
+
+#[test]
 fn web_formats_carry_the_same_table_set() {
     let doc = sample();
     let ttf = export(&doc, ExportFormat::Ttf).unwrap();

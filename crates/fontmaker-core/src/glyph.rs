@@ -70,6 +70,42 @@ pub enum JoiningType {
     Joining,
 }
 
+/// A glyph's outlines captured at one non-default axis location.
+///
+/// The contours must have the same number of points as the default outline
+/// for deltas to be computed at export; mismatched glyphs are skipped.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GlyphVariation {
+    /// Non-default value per axis tag, e.g. `{"wght": 700.0}`.
+    pub location: std::collections::BTreeMap<String, f64>,
+    /// The glyph's outlines at this location.
+    pub contours: Vec<Contour>,
+}
+
+impl GlyphVariation {
+    /// A stable string key for this location, e.g. `wght=700`.
+    pub fn key(&self) -> String {
+        let mut parts: Vec<String> = self
+            .location
+            .iter()
+            .map(|(tag, v)| format!("{tag}={v:.3}"))
+            .collect();
+        parts.sort();
+        parts.join(",")
+    }
+
+    /// Short human label, e.g. `wght 700`.
+    pub fn label(&self) -> String {
+        let mut parts: Vec<String> = self
+            .location
+            .iter()
+            .map(|(tag, v)| format!("{tag} {v:.0}"))
+            .collect();
+        parts.sort();
+        parts.join(" ")
+    }
+}
+
 /// A reference to another glyph's outlines, placed with an offset and a
 /// non-uniform scale.
 ///
@@ -355,6 +391,10 @@ pub struct Glyph {
     /// components and no contours exports as a TrueType composite.
     #[serde(default)]
     pub components: Vec<Component>,
+    /// The glyph's outlines captured at non-default axis locations, used for
+    /// variable-font (`gvar`) export and interpolated previews.
+    #[serde(default)]
+    pub variations: Vec<GlyphVariation>,
     /// Named attachment points used by the Arabic/Hebrew form generator and
     /// by mark positioning. Keyed by name, e.g. `entry`, `exit`, `top`.
     #[serde(default)]
@@ -380,6 +420,7 @@ impl Default for Glyph {
             lsb: 0.0,
             contours: Vec::new(),
             components: Vec::new(),
+            variations: Vec::new(),
             anchors: Default::default(),
             form: Form::Isol,
             note: String::new(),

@@ -9,7 +9,6 @@ mod tests {
     use allsorts::binary::read::ReadScope;
     use allsorts::font_data::FontData;
     use allsorts::gsub::{FeatureMask, FeatureMaskExt};
-    use allsorts::tables::FontTableProvider;
     use allsorts::{tag, Font};
     use fontmaker_core::stroke::rectangle;
     use fontmaker_core::{Document, Glyph, Script};

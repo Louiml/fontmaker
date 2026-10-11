@@ -1,6 +1,7 @@
 //! FontMaker: a pure-Rust typeface editor with an Illustrator-style interface.
 
 mod app;
+mod boolean;
 mod canvas_view;
 mod panels;
 

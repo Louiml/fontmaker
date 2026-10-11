@@ -146,8 +146,70 @@ pub fn build_ttf(doc: &Document) -> Result<Vec<u8>> {
     if let Some(gpos) = crate::layout::build_gpos_kern(doc, &gid_of) {
         builder.add_table(&gpos).expect("GPOS");
     }
+    if doc.axes.len() > 0 {
+        if let Some(fvar) = crate::layout::build_fvar(doc) {
+            builder.add_table(&fvar).expect("fvar");
+        }
+        // gvar deltas must be computed against the compiled quadratic outline
+        // (what glyf stores), so both the default and each captured variation
+        // go through the same simplify + cubic-to-quad pipeline here.
+        let variation_points: Vec<crate::layout::GlyphVariationPoints> = doc
+            .ordered_glyphs()
+            .filter_map(|g| {
+                if g.variations.is_empty() || !g.components.is_empty() {
+                    return None;
+                }
+                let default_points = compiled_quad_points(&g.contours)?;
+                let variations: Vec<_> = g
+                    .variations
+                    .iter()
+                    .filter_map(|v| {
+                        let points = compiled_quad_points(&v.contours)?;
+                        Some((v.location.clone(), points))
+                    })
+                    .collect();
+                if variations.is_empty() {
+                    return None;
+                }
+                Some(crate::layout::GlyphVariationPoints {
+                    name: g.name.clone(),
+                    default_points,
+                    variations,
+                })
+            })
+            .collect();
+        if let Some(gvar) = crate::layout::build_gvar(doc, &variation_points) {
+            builder.add_table(&gvar).expect("gvar");
+        }
+    }
 
     Ok(builder.build())
+}
+
+/// Compiled points of a set of model contours, in `glyf` order.
+///
+/// Runs the exact pipeline `compile_glyph` uses, so the point stream matches
+/// what `glyf` stores and gvar deltas align.
+fn compiled_quad_points(contours: &[fontmaker_core::Contour]) -> Option<Vec<[f64; 2]>> {
+    let mut path = BezPath::new();
+    for c in contours {
+        if !c.closed {
+            return None;
+        }
+        path.extend(simplify_path(&c.to_bezpath()));
+    }
+    if path.is_empty() {
+        return None;
+    }
+    let quad = cubic_to_quadratic(&path, QUAD_TOLERANCE);
+    let simple = SimpleGlyph::from_bezpath(&quad).ok()?;
+    let mut points = Vec::new();
+    for contour in &simple.contours {
+        for point in contour.iter() {
+            points.push([f64::from(point.x), f64::from(point.y)]);
+        }
+    }
+    Some(points)
 }
 
 /// Glyph order for export. `.notdef` must be glyph 0 in every TrueType font.

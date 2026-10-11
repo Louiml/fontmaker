@@ -7,6 +7,7 @@ use fontmaker_core::history::History;
 use fontmaker_core::stroke;
 use fontmaker_export::{export, ExportFormat};
 use fontmaker_script as scripts;
+use crate::boolean::unify_glyph;
 
 use iced::keyboard::{self, key, Key};
 use iced::widget::{column, row};
@@ -178,6 +179,7 @@ pub enum Message {
     RemoveComponent(usize),
     ComponentOffsetX(usize, f64),
     ComponentOffsetY(usize, f64),
+    UnifyGlyph,
     FitView,
     Canvas(CanvasMsg),
 }
@@ -754,6 +756,26 @@ impl App {
             }
             Message::FitView => {
                 self.refit();
+                Task::none()
+            }
+            Message::UnifyGlyph => {
+                if let Some(glyph) = self.doc.glyph(&self.current) {
+                    let result = unify_glyph(glyph);
+                    if result.success {
+                        self.history.begin(&self.doc);
+                        self.history.touch(&self.doc, &self.current);
+                        if let Some(g) = self.doc.glyph_mut(&self.current) {
+                            g.contours = result.contours;
+                        }
+                        self.history.commit(&self.doc);
+                        self.status = result.message;
+                    } else {
+                        self.history.abort();
+                        self.status = result.message;
+                    }
+                } else {
+                    self.status = "No glyph to unify.".to_string();
+                }
                 Task::none()
             }
             Message::Canvas(msg) => self.canvas_message(msg),
